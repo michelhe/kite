@@ -1,0 +1,112 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: kite-admission
+  name: kite-admission
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kite-admission
+  template:
+    metadata:
+      labels:
+        app: kite-admission
+    spec:
+      initContainers:
+        - name: wait-for-service
+          image: busybox:1.28
+          command:
+            [
+              "sh",
+              "-c",
+              "until nslookup kite-admission.$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace).svc.cluster.local; do echo waiting for kite-admission; sleep 2; done;",
+            ]
+      containers:
+        - name: kite-admission-webhook
+          image: kite:dev
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 1m
+              memory: 10Mi
+            limits:
+              cpu: 100m
+              memory: 100Mi
+          args:
+            - kite-admission-webhook
+            - --port=3030
+            - --tls-cert=/etc/webhook/certs/tls.crt
+            - --tls-key=/etc/webhook/certs/tls.key
+          ports:
+            - containerPort: 3030
+              name: webhook
+              protocol: TCP
+          env:
+            - name: IMAGE_NAME  # Needed for the webhook to know which image to inject
+              value: "kite:dev"  # TODO: make sure this is consistent with the image name
+            - name: KITE_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: KITE_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - mountPath: /etc/webhook/certs
+              name: certs
+      volumes:
+        - name: certs
+          secret:
+            secretName: root-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kite-admission
+  namespace: default
+spec:
+  selector:
+    app: kite-admission
+  type: ClusterIP
+  ports:
+    - name: kite-admission
+      protocol: TCP
+      port: 443
+      targetPort: 3030
+
+---
+kind: MutatingWebhookConfiguration
+apiVersion: admissionregistration.k8s.io/v1
+metadata:
+  name: kite-admission-webhook
+  annotations:
+    cert-manager.io/inject-ca-from: default/kite-admission
+webhooks:
+  - name: kite-admission.default.svc
+    clientConfig:
+      service:
+        namespace: default
+        name: kite-admission
+        path: /monitor
+    rules:
+      - apiGroups:
+          - "apps"
+        apiVersions:
+          - "v1"
+        resources:
+          - "pods"
+          - "deployments"
+          - "daemonsets"
+          - "replicasets"
+          - "statefulsets"
+        operations:
+          - "CREATE"
+        scope: Namespaced
+    sideEffects: None
+    failurePolicy: Ignore
+    admissionReviewVersions:
+      - "v1"
