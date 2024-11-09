@@ -2,11 +2,10 @@
 use std::convert::Infallible;
 use std::env;
 
-use anyhow::{anyhow, Result};
+use anyhow::anyhow;
 use clap::Parser;
 use jsonptr::Pointer;
-use k8s_openapi::api::core::v1::{Pod, PodSpec, PodTemplateSpec};
-use kube::api::ObjectMeta;
+use k8s_openapi::api::core::v1::Pod;
 use kube::core::{
     admission::{AdmissionRequest, AdmissionResponse, AdmissionReview, Operation},
     DynamicObject,
@@ -18,121 +17,54 @@ use warp::{reply, Filter};
 use kite::k8s;
 use kite::socket::get_kite_sock;
 
-/// Container for an object to be mutated and has PodSpec and ObjectMeta fields.
-struct PodLikeObject {
-    pod_spec: PodSpec,
-    metadata: ObjectMeta,
-    json_root: Pointer,
-}
-
-/// This function is responsible for parsing the incoming object and returning a PodLikeObject.
-/// This is necessary because the incoming object can be a Pod, Deployment, DaemonSet, etc.
-fn get_pod_like_object(kind: &str, obj: DynamicObject) -> Result<PodLikeObject> {
-    match kind {
-        "Pod" => {
-            let pod: Pod = obj.try_parse()?;
-            // If the object is a plain Pod, it can also be parsed as a PodTemplateSpec.
-            Ok(PodLikeObject {
-                pod_spec: pod.spec.ok_or(anyhow!("No spec field in pod"))?,
-                metadata: pod.metadata,
-                json_root: Pointer::root(),
-            })
-        }
-        _ => {
-            // If the objects is not a Pod, we assume it has a PodTemplateSpec field.
-            let template = obj
-                .data
-                .get("spec")
-                .ok_or(anyhow!("No spec field in object"))?
-                .get("template")
-                .ok_or(anyhow!("No template field in spec"))?;
-
-            let pod_template_spec: PodTemplateSpec = serde_json::from_value(template.clone())?;
-
-            Ok(PodLikeObject {
-                pod_spec: pod_template_spec
-                    .spec
-                    .ok_or(anyhow!("No spec field in pod template"))?,
-                metadata: pod_template_spec
-                    .metadata
-                    .ok_or(anyhow!("No metadata field in pod template"))?,
-                json_root: Pointer::new(["spec", "template"]),
-            })
-        }
-    }
-}
-
-/// Join a root pointer with a list of tokens
-fn join_jsonptr(root: &Pointer, tokens: &[&str]) -> Pointer {
-    let mut p = Pointer::root();
-    p.append(root);
-    p.append(&Pointer::new(tokens));
-    p
-}
-
 /// Add PatchOperations that add the kite.io/patched label to the object
-fn patch_labels(
-    patches: &mut Vec<json_patch::PatchOperation>,
-    obj_metadata: &ObjectMeta,
-    obj_root: &Pointer,
-) {
+fn patch_labels(patches: &mut Vec<json_patch::PatchOperation>, pod: &Pod) {
     // Ensures that annotations exists before adding to it
-    if obj_metadata.labels.is_none() {
+    if pod.metadata.labels.is_none() {
         patches.push(json_patch::PatchOperation::Add(json_patch::AddOperation {
-            path: join_jsonptr(obj_root, &["metadata", "labels"]),
+            path: Pointer::new(&["metadata", "labels"]),
             value: json!({}),
         }));
     }
 
     patches.push(json_patch::PatchOperation::Add(json_patch::AddOperation {
-        path: join_jsonptr(
-            obj_root,
-            &["metadata", "labels", k8s::consts::LABEL_PATCHED],
-        ),
+        path: Pointer::new(&["metadata", "labels", k8s::consts::LABEL_PATCHED]),
         value: json!("true"),
     }));
 }
 
 /// Add PatchOperations that add the kite.io/monitored annotation to the object
-fn patch_annotations(
-    patches: &mut Vec<json_patch::PatchOperation>,
-    obj_metadata: &ObjectMeta,
-    obj_root: &Pointer,
-) {
+fn patch_annotations(patches: &mut Vec<json_patch::PatchOperation>, pod: &Pod) {
     // Ensures that annotations exists before adding to it
-    if obj_metadata.annotations.is_none() {
+    if pod.metadata.annotations.is_none() {
         patches.push(json_patch::PatchOperation::Add(json_patch::AddOperation {
-            path: join_jsonptr(obj_root, &["metadata", "annotations"]),
+            path: Pointer::new(&["metadata", "annotations"]),
             value: json!({}),
         }));
     }
 
     patches.push(json_patch::PatchOperation::Add(json_patch::AddOperation {
-        path: join_jsonptr(
-            obj_root,
-            &["metadata", "annotations", k8s::consts::ANNOTATION_MONITORED],
-        ),
+        path: Pointer::new(&["metadata", "annotations", k8s::consts::ANNOTATION_MONITORED]),
         value: json!("true"),
     }));
 }
 
 /// Add PatchOperations that add the kite volume to the pod spec
-fn patch_kite_volume(
-    patches: &mut Vec<json_patch::PatchOperation>,
-    pod_spec: &PodSpec,
-    obj_root: &Pointer,
-) {
+fn patch_kite_volume(patches: &mut Vec<json_patch::PatchOperation>, pod: &Pod) {
+    // It's OK to unwrap spec here because we checked it in the admission_handler
+    let pod_spec = pod.spec.as_ref().unwrap();
+
     // Ensures that volumes exists before adding to it
     if pod_spec.volumes.is_none() {
         patches.push(json_patch::PatchOperation::Add(json_patch::AddOperation {
-            path: join_jsonptr(obj_root, &["spec", "volumes"]),
+            path: Pointer::new(&["spec", "volumes"]),
             value: json!([]),
         }));
     }
 
     // Add the kite volume entry to the volumes array
     patches.push(json_patch::PatchOperation::Add(json_patch::AddOperation {
-        path: join_jsonptr(obj_root, &["spec", "volumes", "-"]),
+        path: Pointer::new(&["spec", "volumes", "-"]),
         value: json!({
             "name": "kite-socket",
             "hostPath": {
@@ -144,15 +76,14 @@ fn patch_kite_volume(
 }
 
 /// Add PatchOperations that add the initContainer to the pod spec
-fn patch_init_container(
-    patches: &mut Vec<json_patch::PatchOperation>,
-    pod_spec: &PodSpec,
-    obj_root: &Pointer,
-) {
+fn patch_init_container(patches: &mut Vec<json_patch::PatchOperation>, pod: &Pod) {
+    // It's OK to unwrap spec here because we checked it in the admission_handler
+    let pod_spec = pod.spec.as_ref().unwrap();
+
     // Ensures that initContainers exists before adding to it
     if pod_spec.init_containers.is_none() {
         patches.push(json_patch::PatchOperation::Add(json_patch::AddOperation {
-            path: join_jsonptr(obj_root, &["spec", "initContainers"]),
+            path: Pointer::new(&["spec", "initContainers"]),
             value: json!([]),
         }));
     }
@@ -194,7 +125,7 @@ fn patch_init_container(
 
     // Add the initContainer to the pod spec
     patches.push(json_patch::PatchOperation::Add(json_patch::AddOperation {
-        path: join_jsonptr(obj_root, &["spec", "initContainers", "-"]),
+        path: Pointer::new(&["spec", "initContainers", "-"]),
         value: init_container_spec,
     }));
 }
@@ -202,42 +133,47 @@ fn patch_init_container(
 /// Mutate the incoming object by adding the necessary annotations and initContainer
 fn mutate_object(
     req: AdmissionRequest<DynamicObject>,
-    pod_like: PodLikeObject,
-) -> Result<AdmissionResponse> {
+    pod: &Pod,
+) -> anyhow::Result<AdmissionResponse> {
     // The patches to be applied to the object
     let mut patches = Vec::new();
 
-    patch_labels(&mut patches, &pod_like.metadata, &pod_like.json_root);
-    patch_annotations(&mut patches, &pod_like.metadata, &pod_like.json_root);
-    patch_kite_volume(&mut patches, &pod_like.pod_spec, &pod_like.json_root);
-    patch_init_container(&mut patches, &pod_like.pod_spec, &pod_like.json_root);
+    patch_labels(&mut patches, &pod);
+    patch_annotations(&mut patches, &pod);
+    patch_kite_volume(&mut patches, &pod);
+    patch_init_container(&mut patches, &pod);
 
     Ok(AdmissionResponse::from(&req).with_patch(json_patch::Patch(patches))?)
 }
 
 /// This function is responsible for handling the admission of pods.
 /// For now, we only want to add an annotation to the pod. Later, we will attach an initContainer that will be responsible for attaching the eBPF program to the pod.
-async fn admission_handler(body: AdmissionReview<DynamicObject>) -> Result<reply::Json> {
+async fn admission_handler(body: AdmissionReview<DynamicObject>) -> anyhow::Result<reply::Json> {
     tracing::trace!("Admission Handler request {:?}", body);
 
     // Parse incoming webhook AdmissionRequest first
-    let req: AdmissionRequest<_> = body.try_into()?;
+    let req: AdmissionRequest<DynamicObject> = body.try_into()?;
 
-    tracing::info!("Got admission request for a {:?}", req.kind.kind);
+    // Extract the Pod from the request
+    let pod: Pod = req
+        .clone()
+        .object
+        .ok_or(anyhow!("No object in request"))?
+        .try_parse()?;
+    if pod.spec.is_none() {
+        return Err(anyhow!("Pod spec is missing"));
+    }
 
-    let pod_like = get_pod_like_object(
-        &req.kind.kind,
-        req.clone().object.ok_or(anyhow!("No object in request"))?,
-    )?;
+    tracing::debug!(
+        "Pod: {:?} namespace={:?}",
+        pod.metadata.name,
+        pod.metadata.namespace
+    );
 
-    // If the pod template is already patched (i.e Deployment was patched but we also listen for the ReplicaSet)
-    if let Some(labels) = &pod_like.metadata.labels {
+    // If the pod template is already patched for some reason, skip it
+    if let Some(labels) = &pod.metadata.labels {
         if labels.get(k8s::consts::LABEL_PATCHED).is_some() {
-            tracing::debug!(
-                "Skipping {:?}({:?}) because it was already patched",
-                req.kind.kind,
-                pod_like.metadata.name
-            );
+            tracing::debug!("Skipping pod {:?} because it was already patched", pod,);
             return Ok(warp::reply::json(
                 &AdmissionResponse::from(&req).into_review(),
             ));
@@ -245,10 +181,15 @@ async fn admission_handler(body: AdmissionReview<DynamicObject>) -> Result<reply
     }
 
     let response = match req.operation {
-        Operation::Create => mutate_object(req, pod_like)?,
+        Operation::Create => mutate_object(req, &pod)?,
         _ => Err(anyhow!("Operation {:?} not supported", req.operation))?,
     };
 
+    tracing::info!(
+        "Succesfully mutated Pod: {:?} in namespace={:?}",
+        pod.metadata.name,
+        pod.metadata.namespace
+    );
     tracing::trace!("Admission response: {:?}", response);
     // Return the response
     Ok(warp::reply::json(&response.into_review()))
@@ -272,7 +213,7 @@ struct AdmissionControllerArgs {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> anyhow::Result<()> {
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
         // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
         // will be written to stdout.

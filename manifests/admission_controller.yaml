@@ -94,15 +94,11 @@ webhooks:
         path: /monitor
     rules:
       - apiGroups:
-          - "apps"
+          - ""
         apiVersions:
           - "v1"
         resources:
           - "pods"
-          - "deployments"
-          - "daemonsets"
-          - "replicasets"
-          - "statefulsets"
         operations:
           - "CREATE"
         scope: Namespaced
