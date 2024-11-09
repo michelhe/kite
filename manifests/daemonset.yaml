@@ -42,6 +42,7 @@ spec:
     metadata:
       labels:
         app: kite-agent
+        kite.io/no-patch: "1"  # This pod should not be mutated
     spec:
       serviceAccountName: kite-service-account
       containers:

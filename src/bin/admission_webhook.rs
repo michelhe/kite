@@ -173,7 +173,17 @@ async fn admission_handler(body: AdmissionReview<DynamicObject>) -> anyhow::Resu
     // If the pod template is already patched for some reason, skip it
     if let Some(labels) = &pod.metadata.labels {
         if labels.get(k8s::consts::LABEL_PATCHED).is_some() {
-            tracing::debug!("Skipping pod {:?} because it was already patched", pod,);
+            tracing::warn!("Skipping pod {:?} because it was already patched", pod,);
+            return Ok(warp::reply::json(
+                &AdmissionResponse::from(&req).into_review(),
+            ));
+        }
+
+        if labels.get(k8s::consts::LABEL_NO_PATCH).is_some() {
+            tracing::debug!(
+                "Skipping pod {:?} because it does not want to be patched",
+                pod,
+            );
             return Ok(warp::reply::json(
                 &AdmissionResponse::from(&req).into_review(),
             ));

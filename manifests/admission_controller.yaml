@@ -14,6 +14,7 @@ spec:
     metadata:
       labels:
         app: kite-admission
+        kite.io/no-patch: "1"  # This pod should not be mutated
     spec:
       initContainers:
         - name: wait-for-service
