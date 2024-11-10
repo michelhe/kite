@@ -108,8 +108,11 @@ pub async fn kite_daemon_main(args: KiteDaemonArgs) -> Result<()> {
         println!("Pod: {}", pod.metadata.name.as_ref().unwrap());
     }
 
-    println!("Starting main loop");
-    loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-    }
+    tracing::info!("Kite Daemon started, press Ctrl+C to stop");
+
+    tokio::signal::ctrl_c().await?;
+
+    tracing::info!("Exiting");
+
+    Ok(())
 }
