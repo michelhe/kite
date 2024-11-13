@@ -207,8 +207,8 @@ pub async fn load_and_attach_kite_ebpf(cgroup_path: &Path) -> anyhow::Result<Kit
 
 /// Convenience struct to manage multiple eBPF programs and their stats.
 pub struct EbpfManager {
-    /// cgroup_path -> ebpf,
-    ebpfs: Arc<Mutex<HashMap<String, KiteEbpf>>>,
+    /// identifer -> ebpf,
+    pub ebpfs: Arc<Mutex<HashMap<String, KiteEbpf>>>,
 }
 
 pub type SharedEbpfManager = Arc<Mutex<EbpfManager>>;
@@ -220,11 +220,8 @@ impl EbpfManager {
         }))
     }
 
-    pub async fn add(&self, kite: KiteEbpf) {
-        self.ebpfs
-            .lock()
-            .await
-            .insert(kite.cgroup_path().to_string_lossy().to_string(), kite);
+    pub async fn add(&self, ident: String, kite: KiteEbpf) {
+        self.ebpfs.lock().await.insert(ident.to_string(), kite);
     }
 
     pub async fn drop_all(&self) {

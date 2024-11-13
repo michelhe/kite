@@ -113,7 +113,11 @@ pub async fn start_init_hook_server(
                         Ok(message) => {
                             let kite_ebpf =
                                 handle_pod_hello_message(peer_pid, message).await.unwrap();
-                            ebpf_m_clone.lock().await.add(kite_ebpf).await;
+                            ebpf_m_clone
+                                .lock()
+                                .await
+                                .add(message.to_ident(), kite_ebpf)
+                                .await;
                         }
                         Err(e) => {
                             tracing::error!("Error parsing message: {:?}", e);
