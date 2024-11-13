@@ -52,15 +52,17 @@ spec:
             - kite
             # - --label-selector=app=nginx
             # - --field-selector=metadata.namespace=default
-          env:
-            - name: RUST_LOG
-              value: debug,kube=debug
           imagePullPolicy: IfNotPresent
           volumeMounts:
             - name: kite-socket
               mountPath: /var/run/kite
           securityContext:
             privileged: true  # Needed to attach bpf programs
+            capabilities:
+              add:
+                - SYS_ADMIN     # Add capabilities here as required
+                - SYS_PTRACE
+                - NET_ADMIN     # If network control is needed
           resources:
             requests:
               cpu: 100m
@@ -69,6 +71,8 @@ spec:
               cpu: 200m
               memory: 500Mi
           env:
+            - name: RUST_BACKTRACE
+              value: "full"
             - name: KITE_POD_NAME
               valueFrom:
                 fieldRef:
@@ -77,6 +81,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+      hostPID: true  # Needed to manage host processes
       volumes:
         - name: kite-socket
           hostPath:

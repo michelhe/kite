@@ -1,10 +1,8 @@
+use std::{env, time::Duration};
+
+use kite::ipc as kite_ipc;
 use tokio::time::timeout;
 use tracing::{info, Level};
-
-use std::env;
-use std::time::Duration;
-
-use kite::socket as kite_socket;
 
 async fn inner_main() -> anyhow::Result<()> {
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
@@ -19,11 +17,11 @@ async fn inner_main() -> anyhow::Result<()> {
     let pod_name = env::var(kite::k8s::consts::ENV_KITE_POD_NAME)?;
     let namespace = env::var(kite::k8s::consts::ENV_KITE_POD_NAMESPACE)?;
 
-    let message = kite_socket::api::KitePodHelloMessage::new(pod_name, namespace);
+    let message = kite_ipc::messages::PodHelloMessage::new(pod_name, namespace);
 
     info!("Sending message to daemon: {:?}", message);
 
-    let response = timeout(Duration::from_secs(5), kite_socket::send_message(message)).await??;
+    let response = timeout(Duration::from_secs(10), kite_ipc::send_message(message)).await??;
 
     info!("Received response from daemon: {}", response);
 

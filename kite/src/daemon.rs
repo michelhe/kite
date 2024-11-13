@@ -1,52 +1,80 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use super::k8s::pods::get_pods;
-use super::socket::get_kite_sock;
-use anyhow::Result;
-use clap::Parser;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixListener;
+use anyhow::{anyhow, Context};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::UnixListener,
+};
 
-use crate::socket::api::KitePodHelloMessage;
+use crate::{
+    cgroup2::find_cgroup2_mount,
+    ebpf::{load_and_attach_kite_ebpf, KiteEbpf, SharedEbpfManager},
+    ipc::messages::PodHelloMessage,
+};
 
-#[derive(Parser, Debug)]
-#[command(name = "kite")]
-#[command(bin_name = "kite")]
-#[command(version, about, long_about = None)]
-#[command(propagate_version = true)]
-pub struct KiteDaemonArgs {
-    /// The namespace to watch for pods.
-    #[arg(short, long)]
-    namespace: Option<String>,
+/// Handle PodHelloMessage - Load and attach the Kite eBPF program to the pod's cgroup.
+async fn handle_pod_hello_message(
+    peer_pid: i32,
+    message: &PodHelloMessage,
+) -> anyhow::Result<KiteEbpf> {
+    tracing::debug!(
+        "Received message from pod: {:?} peer_pid={}",
+        message,
+        peer_pid
+    );
 
-    /// The label selector to filter pods.
-    /// Default is None.
-    /// Example: "app=nginx"
-    #[arg(long)]
-    label_selector: Option<String>,
+    let kube_client = kube::Client::try_default().await.context(
+        "Failed to create Kubernetes client. Make sure the kubeconfig is correctly configured.",
+    )?;
+    let pods: kube::Api<k8s_openapi::api::core::v1::Pod> =
+        kube::Api::namespaced(kube_client, &message.namespace);
 
-    /// The field selector to filter pods.
-    /// Default is None.
-    /// Example: "status.phase=Running"
-    #[arg(long)]
-    field_selector: Option<String>,
+    let pod = pods.get(&message.pod_name).await.context(
+        "Failed to get pod from Kubernetes API. Make sure the pod is running and the kubelet is reachable.",
+    )?;
+
+    let proc_cgroup = std::fs::read_to_string(format!("/proc/{}/cgroup", peer_pid))
+        .context("Failed reading /proc/pid/cgroup")?;
+
+    // Example 0::/docker/65a1b6ad09655b3f1475ede1aa0061a97c0d1ada9f2b2acac959afbc92094463/kubelet.slice/kubelet-kubepods.slice/kubelet-kubepods-besteffort.slice/kubelet-kubepods-besteffort-pod96dd7de3_0783_4613_a707_e0effc077ef5.slice/cri-containerd-13a0f64b909e3ff2d63f196d6947927a8af997ab68f8fa9ebb6d6c7018af4ec9.scope
+    let cgroup_relative_path: PathBuf = proc_cgroup
+        .lines()
+        .find(|line| line.contains("kubepods"))
+        .ok_or_else(|| anyhow!("Cgroup path not found"))?
+        .split(":")
+        .last()
+        .ok_or_else(|| anyhow!("Cgroup path not found"))?
+        .into();
+    // Trim the first /
+    let cgroup_relative_path = cgroup_relative_path
+        .strip_prefix("/")
+        .unwrap_or(&cgroup_relative_path);
+    tracing::debug!("Cgroup path: {:?}", cgroup_relative_path);
+
+    let container_cgroup_path = find_cgroup2_mount().join(cgroup_relative_path);
+    // We want the cgroup of the pod, not the init container
+    let pod_cgroup_path = container_cgroup_path
+        .parent()
+        .ok_or(anyhow!(format!(
+            "Could not find {:?}",
+            &cgroup_relative_path
+        )))?
+        .to_owned();
+
+    tracing::debug!(
+        "Loading program for pod: {:?} on cgroup path: {:?}",
+        pod.metadata.name,
+        pod_cgroup_path
+    );
+    load_and_attach_kite_ebpf(&pod_cgroup_path).await
 }
 
-async fn handle_hello_message(message: &KitePodHelloMessage) {
-    tracing::debug!("Received message from pod: {:?}", message);
-    // TODO: Use the message details to attach the eBPF program to the pod.
-}
-
-async fn start_init_hook_server(kite_sock: &Path) -> Result<()> {
+pub async fn start_init_hook_server(
+    kite_sock: &Path,
+    ebpf_m: SharedEbpfManager,
+) -> anyhow::Result<()> {
     // Start the init hook server
     // This server listens for new pods and sends a message to the kite daemon
-
-    if kite_sock.exists() {
-        std::fs::remove_file(kite_sock)?;
-    }
-
-    // Create the directory for the socket (recursively)
-    std::fs::create_dir_all(kite_sock.parent().unwrap())?;
 
     // Bind the socket
     let listener = UnixListener::bind(kite_sock)?;
@@ -54,17 +82,38 @@ async fn start_init_hook_server(kite_sock: &Path) -> Result<()> {
     tokio::spawn(async move {
         loop {
             let (stream, _) = listener.accept().await.unwrap();
+
+            tracing::info!(
+                "Received connection from pod {peer_cred:?} {peer_addr:?}",
+                peer_cred = stream.peer_cred(),
+                peer_addr = stream.peer_addr()
+            );
+
+            // Clone the ebpf manager to be used in the async block
+            let ebpf_m_clone = ebpf_m.clone();
+
+            let peer_pid = stream
+                .peer_cred()
+                .unwrap() // TODO: Handle error
+                .pid()
+                .expect("Peer PID is missing on Linux");
+            if peer_pid == 0 {
+                tracing::error!("Peer PID is 0, bad request");
+                continue;
+            }
             let (reader, mut writer) = stream.into_split();
 
             tokio::spawn(async move {
                 let mut lines = BufReader::new(reader).lines();
 
                 if let Ok(Some(line)) = lines.next_line().await {
-                    let message: Result<KitePodHelloMessage, _> = serde_json::from_str(&line);
+                    let message: Result<PodHelloMessage, _> = serde_json::from_str(&line);
 
                     match &message {
                         Ok(message) => {
-                            handle_hello_message(message).await;
+                            let kite_ebpf =
+                                handle_pod_hello_message(peer_pid, message).await.unwrap();
+                            ebpf_m_clone.lock().await.add(kite_ebpf).await;
                         }
                         Err(e) => {
                             tracing::error!("Error parsing message: {:?}", e);
@@ -83,36 +132,11 @@ async fn start_init_hook_server(kite_sock: &Path) -> Result<()> {
                         tracing::error!("Error writing response to pod: {:?}", err);
                     });
                 }
+
+                Ok::<(), anyhow::Error>(()) // <- note the explicit type annotation here
             });
         }
     });
-
-    Ok(())
-}
-
-pub async fn kite_daemon_main(args: KiteDaemonArgs) -> Result<()> {
-    let kite_sock = get_kite_sock();
-
-    // Spawn the init hook server in the background
-    tokio::spawn(async move {
-        let r = start_init_hook_server(&kite_sock).await;
-        if let Err(e) = r {
-            tracing::error!("Error starting init hook server: {:?}", e);
-        }
-    });
-
-    let kube_client = kube::Client::try_default().await?;
-    let pods = get_pods(kube_client.clone(), &args.namespace).await?;
-
-    for pod in pods.items {
-        println!("Pod: {}", pod.metadata.name.as_ref().unwrap());
-    }
-
-    tracing::info!("Kite Daemon started, press Ctrl+C to stop");
-
-    tokio::signal::ctrl_c().await?;
-
-    tracing::info!("Exiting");
 
     Ok(())
 }

@@ -6,6 +6,7 @@ use anyhow::anyhow;
 use clap::Parser;
 use jsonptr::Pointer;
 use k8s_openapi::api::core::v1::Pod;
+use kite::{ipc::get_kite_sock, k8s};
 use kube::core::{
     admission::{AdmissionRequest, AdmissionResponse, AdmissionReview, Operation},
     DynamicObject,
@@ -14,21 +15,18 @@ use serde_json::json;
 use tracing::{info, Level};
 use warp::{reply, Filter};
 
-use kite::k8s;
-use kite::socket::get_kite_sock;
-
 /// Add PatchOperations that add the kite.io/patched label to the object
 fn patch_labels(patches: &mut Vec<json_patch::PatchOperation>, pod: &Pod) {
     // Ensures that annotations exists before adding to it
     if pod.metadata.labels.is_none() {
         patches.push(json_patch::PatchOperation::Add(json_patch::AddOperation {
-            path: Pointer::new(&["metadata", "labels"]),
+            path: Pointer::new(["metadata", "labels"]),
             value: json!({}),
         }));
     }
 
     patches.push(json_patch::PatchOperation::Add(json_patch::AddOperation {
-        path: Pointer::new(&["metadata", "labels", k8s::consts::LABEL_PATCHED]),
+        path: Pointer::new(["metadata", "labels", k8s::consts::LABEL_PATCHED]),
         value: json!("true"),
     }));
 }
@@ -38,13 +36,13 @@ fn patch_annotations(patches: &mut Vec<json_patch::PatchOperation>, pod: &Pod) {
     // Ensures that annotations exists before adding to it
     if pod.metadata.annotations.is_none() {
         patches.push(json_patch::PatchOperation::Add(json_patch::AddOperation {
-            path: Pointer::new(&["metadata", "annotations"]),
+            path: Pointer::new(["metadata", "annotations"]),
             value: json!({}),
         }));
     }
 
     patches.push(json_patch::PatchOperation::Add(json_patch::AddOperation {
-        path: Pointer::new(&["metadata", "annotations", k8s::consts::ANNOTATION_MONITORED]),
+        path: Pointer::new(["metadata", "annotations", k8s::consts::ANNOTATION_MONITORED]),
         value: json!("true"),
     }));
 }
@@ -57,14 +55,14 @@ fn patch_kite_volume(patches: &mut Vec<json_patch::PatchOperation>, pod: &Pod) {
     // Ensures that volumes exists before adding to it
     if pod_spec.volumes.is_none() {
         patches.push(json_patch::PatchOperation::Add(json_patch::AddOperation {
-            path: Pointer::new(&["spec", "volumes"]),
+            path: Pointer::new(["spec", "volumes"]),
             value: json!([]),
         }));
     }
 
     // Add the kite volume entry to the volumes array
     patches.push(json_patch::PatchOperation::Add(json_patch::AddOperation {
-        path: Pointer::new(&["spec", "volumes", "-"]),
+        path: Pointer::new(["spec", "volumes", "-"]),
         value: json!({
             "name": "kite-socket",
             "hostPath": {
@@ -83,7 +81,7 @@ fn patch_init_container(patches: &mut Vec<json_patch::PatchOperation>, pod: &Pod
     // Ensures that initContainers exists before adding to it
     if pod_spec.init_containers.is_none() {
         patches.push(json_patch::PatchOperation::Add(json_patch::AddOperation {
-            path: Pointer::new(&["spec", "initContainers"]),
+            path: Pointer::new(["spec", "initContainers"]),
             value: json!([]),
         }));
     }
@@ -125,7 +123,7 @@ fn patch_init_container(patches: &mut Vec<json_patch::PatchOperation>, pod: &Pod
 
     // Add the initContainer to the pod spec
     patches.push(json_patch::PatchOperation::Add(json_patch::AddOperation {
-        path: Pointer::new(&["spec", "initContainers", "-"]),
+        path: Pointer::new(["spec", "initContainers", "-"]),
         value: init_container_spec,
     }));
 }
@@ -138,10 +136,10 @@ fn mutate_object(
     // The patches to be applied to the object
     let mut patches = Vec::new();
 
-    patch_labels(&mut patches, &pod);
-    patch_annotations(&mut patches, &pod);
-    patch_kite_volume(&mut patches, &pod);
-    patch_init_container(&mut patches, &pod);
+    patch_labels(&mut patches, pod);
+    patch_annotations(&mut patches, pod);
+    patch_kite_volume(&mut patches, pod);
+    patch_init_container(&mut patches, pod);
 
     Ok(AdmissionResponse::from(&req).with_patch(json_patch::Patch(patches))?)
 }
@@ -255,12 +253,18 @@ async fn main() -> anyhow::Result<()> {
 
     // Run the server on an async task
     info!("Starting admission server on port {}", args.port);
-    warp::serve(warp::post().and(monitor))
-        .tls()
-        .cert_path(args.tls_cert)
-        .key_path(args.tls_key)
-        .run(([0, 0, 0, 0], args.port))
-        .await;
+
+    tokio::spawn(async move {
+        warp::serve(warp::post().and(monitor))
+            .tls()
+            .cert_path(args.tls_cert)
+            .key_path(args.tls_key)
+            .run(([0, 0, 0, 0], args.port))
+            .await
+    });
+
+    let ctrl_c = tokio::signal::ctrl_c();
+    ctrl_c.await?;
 
     info!("Exiting admission server");
 

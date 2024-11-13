@@ -1,0 +1,23 @@
+[package]
+name = "kite-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kite-ebpf-common = { path = "../kite-ebpf-common" }
+aya-ebpf = { workspace = true }
+aya-log-ebpf = { workspace = true }
+memoffset = "0.8"
+
+[build-dependencies]
+which = { workspace = true }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[[bin]]
+name = "kite"
+path = "src/main.rs"

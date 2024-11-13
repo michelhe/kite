@@ -1,13 +1,13 @@
-/// This module defines the unix socket communication between the system's components.
-use std::env;
-use std::path::PathBuf;
-use std::sync::Mutex;
-use std::sync::Once;
+//! This module defines the unix socket communication between the system's components.
+//! i.e between the initContainer and the kite daemon.
+use std::{
+    env,
+    path::PathBuf,
+    sync::{Mutex, Once},
+};
 
 use anyhow::anyhow;
-use tokio::io::AsyncBufReadExt as _;
-use tokio::io::AsyncWriteExt as _;
-use tokio::io::BufReader;
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
 pub const ENV_KITE_SOCK: &str = "KITE_SOCK";
 
@@ -49,16 +49,16 @@ pub async fn send_message<M: serde::Serialize>(message: M) -> anyhow::Result<ser
     Ok(serde_json::from_str(&response?)?)
 }
 
-pub mod api {
+pub mod messages {
 
     /// Api message sent from initContainer to the kite daemon
     #[derive(Debug, serde::Serialize, serde::Deserialize)]
-    pub struct KitePodHelloMessage {
-        pod_name: String,
-        namespace: String,
+    pub struct PodHelloMessage {
+        pub pod_name: String,
+        pub namespace: String,
     }
 
-    impl KitePodHelloMessage {
+    impl PodHelloMessage {
         pub fn new(pod_name: String, namespace: String) -> Self {
             Self {
                 pod_name,

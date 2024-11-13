@@ -4,12 +4,17 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+kite-ebpf-common = { path = "../kite-ebpf-common" }
+
+aya = {workspace = true}
+aya-log = {workspace = true}
+
+anyhow = { workspace = true, default-features = true }
+
 clap = { version = "4.5.20", features = ["derive"] }
-tokio = { version = "1", features = ["full"] }
 kube = { version = "0.96.0", features = ["runtime", "derive", "admission"] }
 kube-core = "0.96.0"
 k8s-openapi = { version = "0.23.0", features = ["latest"] }
-anyhow = "1.0.92"
 json-patch = "2"
 serde_json = "1.0.132"
 serde = "1.0.214"
@@ -17,11 +22,33 @@ warp = { version = "0.3.7", features = ["tls"] }
 jsonptr = "0.4.7"
 tracing = "0.1.40"
 tracing-subscriber = "0.3.18"
+libc = { workspace = true }
+tokio = { version = "1", features = ["full"] }
 tokio-serde = { version = "0.9.0", features = ["json", "serde", "serde_json"] }
 tokio-util = { version = "0.7.12", features = ["codec"] }
+which = {workspace = true}
+env_logger = "0.11.5"
+log = "0.4.22"
+
+[build-dependencies]
+cargo_metadata = { workspace = true }
+# TODO(https://github.com/rust-lang/cargo/issues/12375): this should be an artifact dependency, but
+# it's not possible to tell cargo to use `-Z build-std` to build it. We cargo-in-cargo in the build
+# script to build this, but we want to teach cargo about the dependecy so that cache invalidation
+# works properly.
+#
+# Note also that https://github.com/rust-lang/cargo/issues/10593 occurs when `target = ...` is added
+# to an artifact dependency; it seems possible to work around that by setting `resolver = "1"` in
+# Cargo.toml in the workspace root.
+#
+# Finally note that *any* usage of `artifact = ...` in *any* Cargo.toml in the workspace breaks
+# workflows with stable cargo; stable cargo outright refuses to load manifests that use unstable
+# features.
+kite-ebpf = { path = "../kite-ebpf" }
 
 [[bin]]
 name = "kite"
+path = "src/main.rs"
 
 [[bin]]
 name = "kite-init-container"
@@ -30,3 +57,8 @@ path = "src/bin/init_container.rs"
 [[bin]]
 name = "kite-admission-webhook"
 path = "src/bin/admission_webhook.rs"
+
+
+[[bin]]
+name = "kite-loader"
+path = "src/bin/loader.rs"
