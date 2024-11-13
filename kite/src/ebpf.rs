@@ -197,10 +197,7 @@ pub async fn load_and_attach_kite_ebpf(cgroup_path: &Path) -> anyhow::Result<Kit
     program_sock_release.attach(cgroup_file.try_clone()?, CgroupAttachMode::default())?;
     loaded_progs.push("kite_sock_release");
 
-    info!(
-        "Successfully loadded ebpf with programs {:?}",
-        ebpf.programs().map(|(name, _)| name).collect::<Vec<_>>()
-    );
+    info!("Successfully loadded ebpf with programs {:?}", loaded_progs);
 
     Ok(KiteEbpf::new(ebpf, cgroup_path.to_owned()).await)
 }
