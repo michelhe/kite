@@ -1,0 +1,1 @@
+This directory contains simple k8s manifests that spin up a dummy nginx web service, and a pod that spams it with requests.
