@@ -67,7 +67,7 @@ pub mod messages {
         }
 
         pub fn to_ident(&self) -> String {
-            format!("{}-{}", self.namespace, self.pod_name)
+            format!("{}-{}", self.pod_name, self.namespace)
         }
     }
 }
