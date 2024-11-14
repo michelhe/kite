@@ -42,8 +42,7 @@ impl Connection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HTTPRequestEvent {
     pub conn: Connection,
-    pub start_time_ns: u64,
-    pub end_time_ns: u64,
+    pub duration_ns: u64,
     // TODO: bytes sent/received, CPU time, etc.
 }
 

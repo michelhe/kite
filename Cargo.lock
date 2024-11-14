@@ -1390,6 +1390,7 @@ dependencies = [
  "kube-core",
  "libc",
  "log",
+ "num-traits",
  "serde",
  "serde_json",
  "tokio",

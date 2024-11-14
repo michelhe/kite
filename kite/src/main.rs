@@ -3,7 +3,7 @@ use std::time::Duration;
 use clap::Parser;
 use kite::{
     daemon::start_init_hook_server,
-    ebpf::SharedEbpfManager,
+    ebpf::{AggregatedMetric, SharedEbpfManager},
     ipc::get_kite_sock,
     utils::{check_kernel_supported, try_remove_rlimit},
 };
@@ -36,18 +36,18 @@ pub struct KiteDaemonArgs {
 async fn print_stats(ebpf_manager: SharedEbpfManager) {
     let mut interval = interval(Duration::from_secs(5));
     loop {
+        let start = tokio::time::Instant::now();
         interval.tick().await;
         for (ident, kite) in ebpf_manager.lock().await.ebpfs.lock().await.iter() {
-            for (endpoint, stats) in kite.stats().lock().await.iter() {
+            let kite_stats = kite.stats();
+            let mut stats = kite_stats.lock().await;
+            let stats_copy = std::mem::replace(&mut *stats, Default::default());
+            for (endpoint, mut s) in stats_copy.into_iter() {
+                let rps = s.request_count() / start.elapsed().as_secs();
+                let latency: AggregatedMetric<u64> = s.take_latencies().into();
                 info!(
-                    "[{}] Stats for {:?}:{} RPS: {}, Latency (p50/p90/p99): {}/{}/{} ms",
-                    ident,
-                    endpoint.addr,
-                    endpoint.port,
-                    stats.request_count() / 5,
-                    stats.latencies()[0] / 1_000_000,
-                    stats.latencies()[1] / 1_000_000,
-                    stats.latencies()[2] / 1_000_000,
+                    "[{}] Stats for {:?}:{} RPS: {}, Latency {} ms",
+                    ident, endpoint.addr, endpoint.port, rps, latency,
                 );
             }
         }

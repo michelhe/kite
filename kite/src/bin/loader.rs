@@ -4,7 +4,7 @@ use clap::Parser;
 use env_logger::fmt::Formatter;
 use kite::{
     cgroup2,
-    ebpf::{load_and_attach_kite_ebpf, SharedStats},
+    ebpf::{load_and_attach_kite_ebpf, AggregatedMetric, SharedStats},
     utils::{check_kernel_supported, try_remove_rlimit},
 };
 use log::{info, Record};
@@ -33,25 +33,20 @@ struct Opt {
 async fn print_stats(stats: SharedStats, stats_interval: u64) {
     let mut interval = interval(Duration::from_secs(stats_interval));
     loop {
+        let start = tokio::time::Instant::now();
         interval.tick().await;
+
         let mut stats = stats.lock().await;
         let stats_copy = stats.clone();
         *stats = Default::default();
         drop(stats);
-        for (endpoint, stat) in stats_copy.iter() {
-            let mut latencies = stat.latencies().to_vec();
-            latencies.sort_unstable();
-            let p50 = latencies[latencies.len() / 2];
-            let p90 = latencies[(latencies.len() * 90) / 100];
-            let p99 = latencies[(latencies.len() * 99) / 100];
+
+        for (endpoint, mut s) in stats_copy.into_iter() {
+            let latency = AggregatedMetric::from(s.take_latencies());
+            let rps = s.request_count() / start.elapsed().as_secs();
             info!(
-                "{}:{} - RPS: {}, Latency (p50/p90/p99): {}/{}/{} ms",
-                endpoint.addr,
-                endpoint.port,
-                stat.request_count() / interval.period().as_secs(),
-                p50 / 1_000_000,
-                p90 / 1_000_000,
-                p99 / 1_000_000,
+                "{}:{} - RPS: {}, Latency {} ms",
+                endpoint.addr, endpoint.port, rps, latency
             );
         }
     }

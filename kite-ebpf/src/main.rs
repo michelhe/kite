@@ -9,12 +9,9 @@ use aya_ebpf::{
     programs::{SkBuffContext, SockContext},
     EbpfContext,
 };
-use aya_log_ebpf::{debug, error};
+use aya_log_ebpf::{debug, error, info, warn};
 use kite_ebpf_common::{Connection, Endpoint, HTTPRequestEvent};
 
-#[allow(dead_code)]
-#[allow(non_upper_case_globals)]
-#[allow(non_camel_case_types)]
 mod bindings;
 use bindings::{iphdr, tcphdr};
 
@@ -170,7 +167,19 @@ fn try_kite<const INGRESS: bool>(ctx: &SkBuffContext) -> Result<i32, i64> {
                 false => {
                     let start_time_ns = (*data).last_request_time_ns;
                     let end_time_ns = bpf_ktime_get_ns();
-                    let duration = end_time_ns - start_time_ns;
+                    let duration_ns = if end_time_ns < start_time_ns {
+                        warn!(
+                            ctx,
+                            "Negative duration for {:i}:{} -> {:i}:{}",
+                            conn.src.addr,
+                            conn.src.port,
+                            conn.dst.addr,
+                            conn.dst.port,
+                        );
+                        0
+                    } else {
+                        end_time_ns - start_time_ns
+                    };
                     debug!(
                         ctx,
                         "Response from {:i}:{} -> {:i}:{} took {}ms",
@@ -178,15 +187,12 @@ fn try_kite<const INGRESS: bool>(ctx: &SkBuffContext) -> Result<i32, i64> {
                         conn.src.port,
                         conn.dst.addr,
                         conn.dst.port,
-                        duration / 1_000_000,
+                        duration_ns / 1_000_000,
                     );
-                    let event = HTTPRequestEvent {
-                        conn,
-                        start_time_ns,
-                        end_time_ns,
-                    };
+
+                    let event = HTTPRequestEvent { conn, duration_ns };
                     EVENTS.output(ctx, &event, 0);
-                    (*data).total_time_ns += duration;
+                    (*data).total_time_ns += duration_ns;
                 }
             },
             None => {

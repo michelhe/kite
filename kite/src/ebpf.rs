@@ -3,22 +3,25 @@
 //! See loader.rs for a simple example of how to use this module.
 use std::{
     collections::HashMap,
+    fmt,
+    iter::Sum,
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use anyhow::Context as _;
-// Re-exports
-pub use aya::Ebpf;
+pub use aya::Ebpf; // Re-export the Ebpf struct from the aya crate
 use aya::{
     maps::AsyncPerfEventArray,
     programs::{CgroupAttachMode, CgroupSkb, CgroupSkbAttachType, CgroupSock},
 };
-pub use kite_ebpf_common::{Endpoint as LowLevelEndpoint, HTTPRequestEvent};
-use log::{debug, info};
+use log::{debug, info, warn};
+use num_traits::PrimInt;
 use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::bytes::BytesMut;
+
+pub use kite_ebpf_common::{Endpoint as LowLevelEndpoint, HTTPRequestEvent};
 
 #[derive(Debug, Default, Clone)]
 pub struct Stats {
@@ -33,6 +36,56 @@ impl Stats {
 
     pub fn latencies(&self) -> &[u64] {
         &self.latencies
+    }
+
+    pub fn take_latencies(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.latencies)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AggregatedMetric<N>
+where
+    N: PrimInt + Default + Sum,
+{
+    pub avg: f64,
+    pub p50: N,
+    pub p90: N,
+    pub p99: N,
+    pub max: N,
+}
+
+impl<N: PrimInt + Default + Sum> From<Vec<N>> for AggregatedMetric<N> {
+    fn from(value: Vec<N>) -> Self {
+        if value.len() == 0 {
+            return Self::default();
+        }
+        let mut sorted = value;
+        sorted.sort_unstable();
+        let p50 = sorted[sorted.len() / 2];
+        let p90 = sorted[(sorted.len() * 90) / 100];
+        let p99 = sorted[(sorted.len() * 99) / 100];
+        let max = sorted.last().copied().unwrap();
+        let len = sorted.len() as f64;
+        let avg = sorted.iter().map(|&x| x.to_f64().unwrap()).sum::<f64>() / len;
+
+        AggregatedMetric {
+            avg,
+            p50,
+            p90,
+            p99,
+            max,
+        }
+    }
+}
+
+impl fmt::Display for AggregatedMetric<u64> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "avg/p50/p90/p99/max {:.2}/{:.2}/{:.2}/{:.2}/{:.2}",
+            self.avg, self.p50, self.p90, self.p99, self.max
+        )
     }
 }
 
@@ -58,9 +111,7 @@ async fn process_event(event: HTTPRequestEvent, stats: SharedStats) {
     let mut stats = stats.lock().await;
     let entry = (*stats).entry(dst).or_default();
     entry.request_count += 1;
-    entry
-        .latencies
-        .push(event.end_time_ns - event.start_time_ns);
+    entry.latencies.push(event.duration_ns / 1_000_000); // Convert ns to ms
 }
 
 async fn spawn_collectors(
