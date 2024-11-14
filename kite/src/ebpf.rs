@@ -16,7 +16,7 @@ use aya::{
     maps::AsyncPerfEventArray,
     programs::{CgroupAttachMode, CgroupSkb, CgroupSkbAttachType, CgroupSock},
 };
-use log::{debug, info, warn};
+use log::{debug, info};
 use num_traits::PrimInt;
 use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::bytes::BytesMut;

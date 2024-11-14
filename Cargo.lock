@@ -1381,8 +1381,6 @@ dependencies = [
  "cargo_metadata",
  "clap",
  "env_logger",
- "json-patch",
- "jsonptr",
  "k8s-openapi",
  "kite-ebpf",
  "kite-ebpf-common",
@@ -1398,8 +1396,28 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "warp",
  "which",
+]
+
+[[package]]
+name = "kite-admit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "json-patch",
+ "jsonptr",
+ "k8s-openapi",
+ "kite",
+ "kube",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-serde",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "warp",
 ]
 
 [[package]]

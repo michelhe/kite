@@ -48,8 +48,9 @@ spec:
       containers:
         - name: kite-daemon
           image: kite:dev
-          args:
+          command:
             - kite
+          # args:
             # - --label-selector=app=nginx
             # - --field-selector=metadata.namespace=default
           imagePullPolicy: IfNotPresent

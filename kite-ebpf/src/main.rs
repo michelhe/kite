@@ -9,7 +9,7 @@ use aya_ebpf::{
     programs::{SkBuffContext, SockContext},
     EbpfContext,
 };
-use aya_log_ebpf::{debug, error, info, warn};
+use aya_log_ebpf::{debug, error, warn};
 use kite_ebpf_common::{Connection, Endpoint, HTTPRequestEvent};
 
 mod bindings;
