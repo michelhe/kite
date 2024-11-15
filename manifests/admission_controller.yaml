@@ -42,6 +42,7 @@ spec:
             - --port=3030
             - --tls-cert=/etc/webhook/certs/tls.crt
             - --tls-key=/etc/webhook/certs/tls.key
+            - -c=/etc/kite/config/config.yaml
           ports:
             - containerPort: 3030
               name: webhook
@@ -60,10 +61,16 @@ spec:
           volumeMounts:
             - mountPath: /etc/webhook/certs
               name: certs
+            - mountPath: /etc/kite/config/
+              name: kite-config
       volumes:
         - name: certs
           secret:
             secretName: root-secret
+        - name: kite-config
+          configMap:
+            name: kite-admission-config
+
 ---
 apiVersion: v1
 kind: Service
@@ -108,3 +115,50 @@ webhooks:
     failurePolicy: Ignore
     admissionReviewVersions:
       - "v1"
+
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kite-admission-config
+data:
+  config.yaml: |
+    selectors:
+      exclude:
+        matchLabels:
+          kite.io/no-patch: "true"
+    patches:
+      - op: add
+        path: /metadata/labels/kite.io~1patched
+        value: "true"
+      - op: add
+        path: /metadata/annotations/kite.io~1monitored
+        value: "true"
+      - op: add
+        path: /spec/volumes/-
+        value:
+          name: kite-socket
+          hostPath:
+            type: Socket
+            path: /var/run/kite/kite.sock
+      - op: add
+        path: /spec/initContainers/-
+        value:
+          name: kite
+          image: kite:dev
+          command: ["kite-init-container"]
+          volumeMounts:
+            - name: kite-socket
+              mountPath: /var/run/kite/kite.sock
+          env:
+            - name: KITE_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: KITE_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: KITE_SOCK
+              value: /var/run/kite/kite.sock

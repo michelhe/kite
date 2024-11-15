@@ -1400,27 +1400,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kite-admit"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "json-patch",
- "jsonptr",
- "k8s-openapi",
- "kite",
- "kube",
- "serde",
- "serde_json",
- "tokio",
- "tokio-serde",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "warp",
-]
-
-[[package]]
 name = "kite-ebpf"
 version = "0.1.0"
 dependencies = [
@@ -1436,6 +1415,27 @@ name = "kite-ebpf-common"
 version = "0.1.0"
 dependencies = [
  "aya",
+]
+
+[[package]]
+name = "kite-k8s-admit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "json-patch",
+ "jsonptr",
+ "k8s-openapi",
+ "kube",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tokio-serde",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "warp",
 ]
 
 [[package]]
