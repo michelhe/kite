@@ -16,7 +16,7 @@ COPY Cargo.lock .
 COPY kite/Cargo.toml kite/Cargo.toml
 COPY kite-ebpf/Cargo.toml kite-ebpf/Cargo.toml
 COPY kite-ebpf-common/Cargo.toml kite-ebpf-common/Cargo.toml
-COPY kite-admit/Cargo.toml kite-admit/Cargo.toml
+COPY kite-k8s-admit/Cargo.toml kite-k8s-admit/Cargo.toml
 
 COPY kite-ebpf/.cargo/config.toml kite-ebpf/.cargo/config.toml
 COPY kite-ebpf/rust-toolchain.toml kite-ebpf/rust-toolchain.toml
@@ -35,10 +35,10 @@ RUN cargo chef cook --release --recipe-path recipe.json
 COPY kite/ ./kite/
 COPY kite-ebpf/ ./kite-ebpf/
 COPY kite-ebpf-common ./kite-ebpf-common/
-COPY kite-admit/ ./kite-admit/
+COPY kite-k8s-admit/ ./kite-k8s-admit/
 
 # Build the project for release
-RUN cargo build --workspace --release
+RUN cargo build --release
 
 # Stage 2: Create a minimal image with the compiled binary
 FROM debian:bookworm-slim
@@ -50,10 +50,9 @@ RUN apt-get update && apt-get install -y \
 
 # Copy the compiled binary from the builder stage
 COPY --from=builder /app/target/release/kite /usr/local/bin/kite
-COPY --from=builder /app/target/release/kite-admit /usr/local/bin/kite-admit
+COPY --from=builder /app/target/release/kite-k8s-admit /usr/local/bin/kite-k8s-admit
 COPY --from=builder /app/target/release/kite-init-container /usr/local/bin/kite-init-container
 COPY --from=builder /app/target/release/kite-loader /usr/local/bin/kite-loader
-
 
 # Expose the port the admission controller listens on
 EXPOSE 3030

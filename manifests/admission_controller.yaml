@@ -37,7 +37,7 @@ spec:
               cpu: 100m
               memory: 100Mi
           command:
-            - kite-admit
+            - kite-k8s-admit
           args:
             - --port=3030
             - --tls-cert=/etc/webhook/certs/tls.crt
