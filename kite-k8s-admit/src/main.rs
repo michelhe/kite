@@ -1,6 +1,5 @@
 /// The admission controller module is responsible for mutating incoming pods
 use std::{
-    collections::HashSet,
     convert::Infallible,
     future::Future,
     path::{Path, PathBuf},
@@ -8,13 +7,16 @@ use std::{
 
 use anyhow::{anyhow, Context};
 use clap::Parser;
-use config::Config;
+use config::{Config, PatchRule};
 use json_patch::{AddOperation, Patch, PatchOperation};
 use jsonptr::Pointer;
 use k8s_openapi::api::core::v1::Pod;
-use kube::core::{
-    admission::{AdmissionRequest, AdmissionResponse, AdmissionReview},
-    DynamicObject,
+use kube::{
+    core::{
+        admission::{AdmissionRequest, AdmissionResponse, AdmissionReview},
+        DynamicObject,
+    },
+    ResourceExt,
 };
 use serde_json::json;
 use tracing::{info, Level};
@@ -24,42 +26,6 @@ mod config;
 
 /// The label that indicates that the pod has been patched by the admission controller already.
 pub const LABEL_PATCHED: &str = "kite.io/patched";
-
-/// Perform the label selector logic to determine if the pod should be selected.
-/// matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
-pub(self) fn run_match_labels(
-    labels: &std::collections::BTreeMap<String, String>,
-    match_labels: &std::collections::BTreeMap<String, String>,
-) -> bool {
-    match_labels
-        .iter()
-        .all(|(key, value)| labels.get(key).map_or(false, |v| v == value))
-}
-
-fn should_apply_patches(pod: &Pod, config: &Config) -> bool {
-    match &config.selectors {
-        Some(selectors) => {
-            let pod_labels = pod.metadata.labels.clone().unwrap_or_default();
-
-            // If include is set, we only apply patches to pods that match the labels.
-            if let Some(include) = &selectors.include {
-                if !run_match_labels(&pod_labels, &include.match_labels) {
-                    return false;
-                }
-            }
-
-            // If exclude is set, we skip patches for pods that match the labels. Exclude takes precedence over include.
-            if let Some(exclude) = &selectors.exclude {
-                if run_match_labels(&pod_labels, &exclude.match_labels) {
-                    return false;
-                }
-            }
-
-            true
-        }
-        None => true,
-    }
-}
 
 /// Per RFC 6901, If the currently referenced value is a JSON array, the reference token MUST contain either
 /// 1. characters comprised of digits (see ABNF below; note that leading zeros are not allowed)
@@ -74,14 +40,18 @@ fn is_referencing_an_array(token: &jsonptr::Token) -> bool {
 }
 
 /// Implictly create non-existent documents in the pod JSON and initialize them with an empty value.
-fn create_non_existent_values(pod: &Pod, patches: Vec<PatchOperation>) -> Vec<PatchOperation> {
+/// This function creates the missing documents as PatchOperation::Add operations.
+/// The pod object is consumed and returned in the patched form along with the PatchOperations that were created.
+fn patch_and_fill_default_values(
+    pod: Pod,
+    patches: &[PatchOperation],
+) -> anyhow::Result<(Pod, Vec<PatchOperation>)> {
     let mut result = Vec::new();
 
-    let pod_value = serde_json::to_value(pod).unwrap();
-
-    let mut created = HashSet::new();
+    let mut pod_value = serde_json::to_value(pod)?;
 
     for patch in patches {
+        let mut ops = vec![];
         let path = patch.path();
 
         if path.is_root() {
@@ -105,22 +75,43 @@ fn create_non_existent_values(pod: &Pod, patches: Vec<PatchOperation>) -> Vec<Pa
                     } else {
                         json!({})
                     };
-                    if !created.contains(&current_path) {
-                        result.push(PatchOperation::Add(AddOperation {
-                            path: current_path.clone(),
-                            value: new_value.clone(),
-                        }));
-                        created.insert(current_path.clone());
-                    }
+                    let add = PatchOperation::Add(AddOperation {
+                        path: current_path.clone(),
+                        value: new_value.clone(),
+                    });
+                    ops.push(add);
                     current_path.push_back(token.clone());
                 }
             }
-            _ => {}
+            Err(e) => {
+                return Err(e.into());
+            }
+            Ok(_) => {}
         }
-        result.push(patch.clone());
+        ops.push(patch.clone());
+
+        json_patch::patch(&mut pod_value, &ops)?;
+        result.extend(ops.into_iter());
     }
 
-    result
+    Ok((serde_json::from_value(pod_value)?, result))
+}
+
+/// Evaluate patch rules against the pod and return all that patches that should be applied.
+pub(self) fn execute_rules(
+    rules: &[PatchRule],
+    mut pod: Pod,
+    patches: &mut Vec<PatchOperation>,
+) -> anyhow::Result<Pod> {
+    let labels = pod.labels().clone();
+
+    for rule in rules.iter().filter(|rule| rule.is_matching(&labels)) {
+        let (new_pod, todo_patches) = patch_and_fill_default_values(pod, &rule.patches)?;
+        patches.extend(todo_patches.into_iter());
+        pod = new_pod;
+    }
+
+    Ok(pod)
 }
 
 /// This function is responsible for handling the admission of pods.
@@ -160,9 +151,12 @@ async fn admission_handler(
         }
     }
 
-    if !should_apply_patches(&pod, config) {
+    let mut patches = Vec::new();
+    let pod = execute_rules(&config.rules, pod, &mut patches)?;
+
+    if patches.is_empty() {
         tracing::trace!(
-            "Skipping pod {:?} because it does not match the selectors",
+            "Skipping pod {:?} because no patches are required",
             pod.metadata.name
         );
         return Ok(warp::reply::json(
@@ -170,15 +164,18 @@ async fn admission_handler(
         ));
     }
 
-    // let mut patches = make_default_patches(&pod);
-
-    let mut patches = vec![PatchOperation::Add(AddOperation {
-        path: Pointer::new(["metadata", "labels", LABEL_PATCHED]),
-        value: json!("true"),
-    })];
-    patches.extend_from_slice(&config.patches);
-
-    let patches = create_non_existent_values(&pod, patches);
+    // Add a label to the pod to indicate that it has been patched
+    let pod = execute_rules(
+        &[PatchRule::new(
+            None,
+            vec![PatchOperation::Add(AddOperation {
+                path: Pointer::new(["metadata", "labels", LABEL_PATCHED]),
+                value: json!("true"),
+            })],
+        )],
+        pod,
+        &mut patches,
+    )?;
 
     let response = AdmissionResponse::from(&req).with_patch(Patch(patches))?;
 
@@ -292,89 +289,152 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_match_labels() {
-        let mut labels = vec![("app".to_string(), "nginx".to_string())]
-            .into_iter()
-            .collect();
-        let match_labels = vec![("app".to_string(), "nginx".to_string())]
-            .into_iter()
-            .collect();
+    fn test_example_1_inject_label() {
+        let config = Config::from_str(
+            r#"
+            rules: 
+            - selectors: {}
+              patches:
+              - op: add
+                path: /spec/containers/0/env/-
+                value:
+                  name: KUBE_POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                      "#,
+        )
+        .unwrap();
 
-        assert_eq!(run_match_labels(&labels, &match_labels), true);
+        let pod: Pod = serde_json::from_value(json!({
+            "metadata": {
+                "name": "my-pod",
+                "namespace": "default"
+            },
+            "spec": {
+                "containers": [
+                    {
+                        "name": "nginx",
+                        "image": "nginx:latest"
+                    }
+                ]
+            }
+        }))
+        .unwrap();
 
-        labels.remove("app");
+        let mut patches = Vec::new();
+        let pod = execute_rules(&config.rules, pod, &mut patches).unwrap();
 
-        assert_eq!(run_match_labels(&labels, &match_labels), false);
-    }
+        assert_eq!(patches.len(), 2);
 
-    #[test]
-    fn test_should_apply_patches_no_selectors() {
-        let config = Config {
-            selectors: None,
-            patches: vec![],
-        };
-
-        let pod = Pod::default();
-
-        assert_eq!(should_apply_patches(&pod, &config), true);
-    }
-
-    #[test]
-    fn test_should_apply_patches_include() {
-        let config = Config {
-            selectors: Some(config::Selectors {
-                include: Some(config::LabelSelector {
-                    match_labels: vec![("app".to_string(), "nginx".to_string())]
-                        .into_iter()
-                        .collect(),
-                }),
-                exclude: None,
-            }),
-            patches: vec![],
-        };
-
-        let mut pod = Pod::default();
-
-        assert_eq!(should_apply_patches(&pod, &config), false);
-
-        pod.metadata.labels = Some(
-            vec![("app".to_string(), "nginx".to_string())]
-                .into_iter()
-                .collect(),
+        assert_eq!(
+            patches[0],
+            serde_json::from_value(json!({
+                "op": "add",
+                "path": "/spec/containers/0/env",
+                "value": []
+            }))
+            .unwrap()
         );
 
-        assert_eq!(should_apply_patches(&pod, &config), true);
-    }
-
-    #[test]
-    fn test_should_apply_patches_exclude() {
-        let config = Config {
-            selectors: Some(config::Selectors {
-                include: None,
-                exclude: Some(config::LabelSelector {
-                    match_labels: vec![("app".to_string(), "nginx".to_string())]
-                        .into_iter()
-                        .collect(),
-                }),
-            }),
-            patches: vec![],
-        };
-
-        let mut pod = Pod::default();
-
-        assert_eq!(should_apply_patches(&pod, &config), true);
-
-        pod.metadata.labels = Some(
-            vec![("app".to_string(), "nginx".to_string())]
-                .into_iter()
-                .collect(),
+        assert_eq!(
+            patches[1],
+            serde_json::from_value(json!({
+                "op": "add",
+                "path": "/spec/containers/0/env/-",
+                "value": {
+                    "name": "KUBE_POD_NAME",
+                    "valueFrom": {
+                        "fieldRef": {
+                            "fieldPath": "metadata.name"
+                        }
+                    }
+                }
+            }))
+            .unwrap()
         );
 
-        assert_eq!(should_apply_patches(&pod, &config), false);
+        assert_eq!(
+            pod.spec.as_ref().unwrap().containers[0]
+                .env
+                .as_ref()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        assert_eq!(
+            pod.spec.as_ref().unwrap().containers[0]
+                .env
+                .as_ref()
+                .unwrap()[0]
+                .name,
+            "KUBE_POD_NAME"
+        );
     }
 
     #[test]
-    fn test_create_non_existent_values() {
+    fn test_example_2_inject_volume_mount() {
+        let config = Config::from_str(
+            r#"
+            rules:
+            - selectors:
+                include:
+                  matchLabels:
+                    app: my-app
+              patches:
+                - op: add
+                  path: /spec/containers/0/volumeMounts/-
+                  value:
+                    name: my-volume
+                    mountPath: /path/to/mount
+                - op: add
+                  path: /spec/volumes/-
+                  value:
+                    name: my-volume
+                    emptyDir: {}
+            "#,
+        )
+        .unwrap();
+
+        let pod: Pod = serde_json::from_value(json!({
+            "metadata": {
+                "name": "my-pod",
+                "namespace": "default",
+                "labels": {
+                    "app": "my-app"
+                }
+            },
+            "spec": {
+                "containers": [
+                    {
+                        "name": "nginx",
+                        "image": "nginx:latest"
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+
+        let mut patches = Vec::new();
+        let pod = execute_rules(&config.rules, pod, &mut patches).unwrap();
+
+        assert_eq!(
+            pod.spec.as_ref().unwrap().volumes.as_ref().unwrap()[0].name,
+            "my-volume"
+        );
+        assert_eq!(
+            pod.spec.as_ref().unwrap().containers[0]
+                .volume_mounts
+                .as_ref()
+                .unwrap()[0]
+                .name,
+            "my-volume"
+        );
+    }
+
+    #[test]
+    fn test_patch_and_fill_default_values() {
         let pod: Pod = serde_json::from_value(json!({
             "spec": {
                 "containers": [
@@ -402,8 +462,10 @@ mod tests {
             // This operation is missing both initContainers array and an element within it.
             {
                 "op": "add",
-                "path": "/spec/initContainers/-/name",
-                "value": "my-init-container"
+                "path": "/spec/initContainers/-",
+                "value": {
+                    "name": "my-init-container"
+                }
             },
             // This should create the env var array
             {
@@ -426,11 +488,55 @@ mod tests {
         ]);
         let patches: Vec<PatchOperation> = serde_json::from_value(patches).unwrap();
 
-        let patches = create_non_existent_values(&pod, patches);
+        let (pod, patches) = patch_and_fill_default_values(pod, &patches).unwrap();
 
-        eprintln!("{:?}", patches);
+        eprintln!("{}", serde_json::to_value(&pod).unwrap());
 
-        assert!(patches.len() == 8);
+        // Check that the labels object was created and populated with the patched label.
+        assert_eq!(
+            pod.metadata.labels.unwrap().get("kite.io/patched"),
+            Some(&"true".to_string())
+        );
+        // Check that the initContainers array was created and populated with the init container.
+        assert!(
+            pod.spec
+                .as_ref()
+                .unwrap()
+                .init_containers
+                .as_ref()
+                .unwrap()
+                .len()
+                == 1
+        );
+        assert_eq!(
+            pod.spec.as_ref().unwrap().init_containers.as_ref().unwrap()[0].name,
+            "my-init-container"
+        );
+        // Check that the env var array was created and populated with the env var.
+        assert!(
+            pod.spec.as_ref().unwrap().containers[0]
+                .env
+                .as_ref()
+                .unwrap()
+                .len()
+                == 2
+        );
+        assert_eq!(
+            pod.spec.as_ref().unwrap().containers[0]
+                .env
+                .as_ref()
+                .unwrap()[0]
+                .name,
+            "MY_ENV"
+        );
+        assert_eq!(
+            pod.spec.as_ref().unwrap().containers[0]
+                .env
+                .as_ref()
+                .unwrap()[1]
+                .name,
+            "MY_ENV_2"
+        );
 
         assert_eq!(
             patches[0],
@@ -457,23 +563,15 @@ mod tests {
             serde_json::from_value(json!({
                 "op": "add",
                 "path": "/spec/initContainers/-",
-                "value": {}
+                "value": {
+                    "name": "my-init-container"
+                }
             }))
             .unwrap()
         );
 
         assert_eq!(
-            patches[3],
-            serde_json::from_value(json!({
-                "op": "add",
-                "path": "/spec/initContainers/-",
-                "value": {}
-            }))
-            .unwrap()
-        );
-
-        assert_eq!(
-            patches[5],
+            patches[4],
             serde_json::from_value(json!({
                 "op": "add",
                 "path": "/spec/containers/0/env",
@@ -483,7 +581,7 @@ mod tests {
         );
 
         assert_eq!(
-            patches[6],
+            patches[5],
             serde_json::from_value(json!({
                 "op": "add",
                 "path": "/spec/containers/0/env/-",
@@ -497,7 +595,7 @@ mod tests {
 
         // Check that a second patch to create env vars is not created.
         assert_eq!(
-            patches[7],
+            patches[6],
             serde_json::from_value(json!({
                 "op": "add",
                 "path": "/spec/containers/0/env/-",

@@ -8,27 +8,31 @@ It is used in the Kite project to inject [Init Containers](https://kubernetes.io
 ## Configuration File
 
 
-The admission controller requires a configuration file in YAML or JSON format to specify patching rules:
+The admission controller requires a configuration file in YAML or JSON format to specify patching rules.
 
-- **selectors**: Define inclusion and exclusion criteria based on pod labels.
-  - **include**: Apply patches to Pods with these labels. If empty, all Pods are included.
-  - **exclude**: Do not apply patches to Pods with these labels. Exclude takes precedence over include.
-- **patches**: List of JSON patch operations specifying the modifications to apply.
-  - **op**: Type of operation (e.g., `add`).
-  - **path**: Target path in the pod spec in [JSON Pointer](https://datatracker.ietf.org/doc/html/rfc6901) format.
-  - **value**: Value for the operation.
+Each rule consists of an optional label selector and a list of JSON patches to apply to Pods that match the selector.
 
 
-> 💡 **Note**: Normally, JSON patches cannot modify values that don’t exist in the document. However, the admission controller will automatically create necessary fields if they are missing, so you can use the `add` operation freely without concern for field existence.
+- selectors: Define inclusion and exclusion criteria based on pod labels.
+  - include: Apply patches to Pods with these labels. If empty, all Pods are included.
+  - exclude: Do not apply patches to Pods with these labels. Exclude takes precedence over include.
+- patches: List of JSON patch operations specifying the modifications to apply.
+  - op: Type of operation (e.g., `add`).
+  - path: Target path in the pod spec in [JSON Pointer](https://datatracker.ietf.org/doc/html/rfc6901) format.
+  - value: Value for the operation.
 
-### Example: Injecting KUBE_POD_NAME into every Container
+
+> 💡 Note: Normally, JSON patches cannot modify values that don’t exist in the document. However, the admission controller will automatically create necessary fields if they are missing, so you can use the `add` operation freely without concern for field existence.
+
+### Example 1: Injecting KUBE_POD_NAME into every Container
 
 To inject the `KUBE_POD_NAME` environment variable into a container, this configuration can be used:
 
 ```yaml
 # config.yaml
-selectors: {}
-patches:
+rules: 
+- selectors: {}
+  patches:
   - op: add
     path: /spec/containers/0/env/-
     value:
@@ -40,6 +44,28 @@ patches:
 
 This will add the `KUBE_POD_NAME` environment variable to the first container in each pod's container list.
 
+
+### Example 2: Injecting a volume mount into specific Pods
+
+```yaml
+# config.yaml
+rules:
+- selectors:
+    include:
+      matchLabels:
+        app: my-app
+  patches:
+    - op: add
+      path: /spec/containers/0/volumeMounts/-
+      value:
+        name: my-volume
+        mountPath: /path/to/mount
+    - op: add
+      path: /spec/volumes/-
+      value:
+        name: my-volume
+        emptyDir: {}
+```
 
 ## Deployment
 
