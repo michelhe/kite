@@ -214,7 +214,7 @@ struct Args {
 }
 
 async fn webhook_task(port: u16, config_file: PathBuf, tls: Option<TlsArgs>) {
-    let monitor = warp::path("monitor")
+    let filter = warp::path("webhook")
         .and(warp::body::json())
         .and_then(move |body: AdmissionReview<DynamicObject>| {
             let config_file = config_file.clone();
@@ -240,7 +240,7 @@ async fn webhook_task(port: u16, config_file: PathBuf, tls: Option<TlsArgs>) {
         // Unwrap the TLS arguments, safe to unwrap as the CLI parser ensures that both are present.
         let tls_cert = tls.tls_cert.unwrap();
         let tls_key = tls.tls_key.unwrap();
-        warp::serve(warp::post().and(monitor))
+        warp::serve(warp::post().and(filter))
             .tls()
             .key_path(tls_key)
             .cert_path(tls_cert)
@@ -253,7 +253,7 @@ async fn webhook_task(port: u16, config_file: PathBuf, tls: Option<TlsArgs>) {
             .await;
     } else {
         tracing::warn!("TLS is not enabled. Webhooks in Kubernetes require HTTPS.");
-        warp::serve(warp::post().and(monitor))
+        warp::serve(warp::post().and(filter))
             .bind_with_graceful_shutdown(([0, 0, 0, 0], port), async move {
                 tokio::signal::ctrl_c()
                     .await

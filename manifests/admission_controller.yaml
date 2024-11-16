@@ -100,7 +100,7 @@ webhooks:
       service:
         namespace: default
         name: kite-admission
-        path: /monitor
+        path: /webhook
     rules:
       - apiGroups:
           - ""
