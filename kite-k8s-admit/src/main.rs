@@ -1,9 +1,5 @@
 /// The admission controller module is responsible for mutating incoming pods
-use std::{
-    convert::Infallible,
-    future::Future,
-    path::{Path, PathBuf},
-};
+use std::{convert::Infallible, path::PathBuf};
 
 use anyhow::{anyhow, Context};
 use clap::Parser;
@@ -191,32 +187,33 @@ async fn admission_handler(
     Ok(warp::reply::json(&response.into_review()))
 }
 
+#[derive(clap::Args, Debug, Clone)]
+struct TlsArgs {
+    /// The path to the TLS certificate.
+    #[arg(long, requires = "tls_key")]
+    tls_cert: Option<PathBuf>,
+    /// The path to the TLS key.
+    #[arg(long, requires = "tls_cert")]
+    tls_key: Option<PathBuf>,
+}
+
 #[derive(Parser, Debug, Clone)]
 #[command(name = "kite-admission-webhook")]
 #[command(version, about, long_about = None)]
 #[command(propagate_version = true)]
 struct Args {
+    /// The port to listen on.
+    #[arg(short, long, default_value = "3030")]
+    port: u16,
     #[arg(short, long)]
     /// Path to the configuration file.
     config_file: PathBuf,
-    /// The path to the TLS certificate.
-    #[arg(long)]
-    tls_cert: PathBuf,
-    /// The path to the TLS key.
-    #[arg(long)]
-    tls_key: PathBuf,
-    /// The port to listen on.
-    /// Default is 3030.
-    #[arg(short, long, default_value = "3030")]
-    port: u16,
+
+    #[command(flatten)]
+    tls_args: Option<TlsArgs>,
 }
 
-fn webhook_task(
-    tls_cert: &Path,
-    tls_key: &Path,
-    port: u16,
-    config_file: PathBuf,
-) -> impl Future<Output = ()> + 'static {
+async fn webhook_task(port: u16, config_file: PathBuf, tls: Option<TlsArgs>) {
     let monitor = warp::path("monitor")
         .and(warp::body::json())
         .and_then(move |body: AdmissionReview<DynamicObject>| {
@@ -238,16 +235,33 @@ fn webhook_task(
         .with(warp::trace::request());
 
     info!("Starting webhook server on port {}", port);
-    let (_addr, fut) = warp::serve(warp::post().and(monitor))
-        .tls()
-        .cert_path(tls_cert)
-        .key_path(tls_key)
-        .bind_with_graceful_shutdown(([0, 0, 0, 0], port), async move {
-            tokio::signal::ctrl_c()
-                .await
-                .expect("Failed to install CTRL+C signal handler");
-        });
-    fut
+
+    if let Some(tls) = tls {
+        // Unwrap the TLS arguments, safe to unwrap as the CLI parser ensures that both are present.
+        let tls_cert = tls.tls_cert.unwrap();
+        let tls_key = tls.tls_key.unwrap();
+        warp::serve(warp::post().and(monitor))
+            .tls()
+            .key_path(tls_key)
+            .cert_path(tls_cert)
+            .bind_with_graceful_shutdown(([0, 0, 0, 0], port), async move {
+                tokio::signal::ctrl_c()
+                    .await
+                    .expect("Failed to install CTRL+C signal handler");
+            })
+            .1
+            .await;
+    } else {
+        tracing::warn!("TLS is not enabled. Webhooks in Kubernetes require HTTPS.");
+        warp::serve(warp::post().and(monitor))
+            .bind_with_graceful_shutdown(([0, 0, 0, 0], port), async move {
+                tokio::signal::ctrl_c()
+                    .await
+                    .expect("Failed to install CTRL+C signal handler");
+            })
+            .1
+            .await;
+    }
 }
 
 #[tokio::main]
@@ -271,9 +285,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Run the server on an async task
 
-    tokio::spawn(async move {
-        webhook_task(&args.tls_cert, &args.tls_key, args.port, args.config_file).await
-    });
+    tokio::spawn(async move { webhook_task(args.port, args.config_file, args.tls_args).await });
 
     let ctrl_c = tokio::signal::ctrl_c();
     ctrl_c.await?;
