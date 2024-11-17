@@ -6,7 +6,7 @@ metadata:
 spec:
   containers:
   - name: spammer
-    image: busybox
+    image: busybox:latest
     command: ["/bin/sh", "-c"]
     args:
-      - while true; do wget -O - http://webserver-service.default.svc.cluster.local; done;
+      - while true; do wget -O - http://webserver-service.default.svc; done;

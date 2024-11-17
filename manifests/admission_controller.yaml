@@ -130,7 +130,7 @@ data:
     - selectors:
         exclude:
           matchLabels:
-            kite.io/no-patch: "true"
+            kite.io/no-patch: "1"
       patches:
         - op: add
           path: /metadata/labels/kite.io~1patched
