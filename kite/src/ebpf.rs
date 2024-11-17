@@ -16,7 +16,7 @@ use aya::{
     maps::AsyncPerfEventArray,
     programs::{CgroupAttachMode, CgroupSkb, CgroupSkbAttachType, CgroupSock},
 };
-use log::{debug, info};
+use log::{debug, info, warn};
 use num_traits::PrimInt;
 use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::bytes::BytesMut;
@@ -205,9 +205,12 @@ impl KiteEbpf {
             .program_mut("kite_sock_release")
             .context("Failed to get program")?
             .try_into()?;
-        program_sock_release.load()?;
-        program_sock_release.attach(cgroup_file.try_clone()?, CgroupAttachMode::default())?;
-        loaded_progs.push("kite_sock_release");
+        if program_sock_release.load().is_ok() {
+            program_sock_release.attach(cgroup_file.try_clone()?, CgroupAttachMode::default())?;
+            loaded_progs.push("kite_sock_release");
+        } else {
+            warn!("Failed to load kite_sock_release program, skipping for now. TODO fix this, without this program we may leak memory");
+        }
 
         info!("Successfully loadded ebpf with programs {:?}", loaded_progs);
 
