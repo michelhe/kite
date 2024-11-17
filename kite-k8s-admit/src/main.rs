@@ -232,7 +232,10 @@ async fn admission_handler(
     if let Some(obj) = &req.object {
         if let Some(labels) = obj.metadata.labels.as_ref() {
             if labels.get(LABEL_PATCHED).is_some() {
-                tracing::warn!("Skipping {kind:?} {name:?} in namespace {namespace:?} because it was already patched", kind=req.kind.kind, name=obj.metadata.name, namespace=obj.metadata.namespace);
+                tracing::warn!("Skipping {kind:?} {name:?} in namespace {namespace:?} because it was already patched",
+                    kind=req.kind.kind,
+                    name=obj.metadata.name,
+                    namespace=obj.metadata.namespace);
                 return Ok(AdmissionResponse::from(&req).into_review());
             }
         }
