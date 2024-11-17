@@ -117,34 +117,22 @@ pub async fn start_init_hook_server(
                 let mut lines = BufReader::new(reader).lines();
 
                 if let Ok(Some(line)) = lines.next_line().await {
-                    let message: Result<PodHelloMessage, _> = serde_json::from_str(&line);
+                    let message: PodHelloMessage =
+                        serde_json::from_str(&line).context("Failed to parse message")?;
 
-                    match &message {
-                        Ok(message) => {
-                            let kite_ebpf =
-                                handle_pod_hello_message(peer_pid, message).await.unwrap();
-                            ebpf_m_clone
-                                .lock()
-                                .await
-                                .add(message.to_ident(), kite_ebpf)
-                                .await;
-                        }
-                        Err(e) => {
-                            tracing::error!("Error parsing message: {:?}", e);
-                        }
-                    }
+                    let kite_ebpf = handle_pod_hello_message(peer_pid, &message)
+                        .await
+                        .context("Failed to attach the ebpf")?;
+                    ebpf_m_clone
+                        .lock()
+                        .await
+                        .add(message.to_ident(), kite_ebpf)
+                        .await;
 
                     // Send a response back to the pod
                     let response = "{\"message\": \"success\"}";
-                    writer
-                        .write_all(response.as_bytes())
-                        .await
-                        .unwrap_or_else(|err| {
-                            tracing::error!("Error writing response to pod: {:?}", err);
-                        });
-                    writer.write_all(b"\n").await.unwrap_or_else(|err| {
-                        tracing::error!("Error writing response to pod: {:?}", err);
-                    });
+                    writer.write_all(response.as_bytes()).await?;
+                    writer.write_all(b"\n").await?;
                 }
 
                 Ok::<(), anyhow::Error>(()) // <- note the explicit type annotation here
