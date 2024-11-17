@@ -1,11 +1,33 @@
-FROM lukemathwalker/cargo-chef:latest-rust-1.82 AS chef
+FROM rust:1.82-bookworm AS chef-base
+
+# Install musl-dev on Alpine to avoid error "ld: cannot find crti.o: No such file or directory"
+RUN ((cat /etc/os-release | grep ID | grep alpine) && apk add --no-cache musl-dev || true) \
+    && cargo install cargo-chef --locked --version 0.1.68 \
+    && rm -rf $CARGO_HOME/registry/
+
+# Add nightly toolchain for eBPF
+RUN rustup toolchain install nightly --component rust-src
+
+FROM chef-base AS chef-amd64
 WORKDIR /app
 
 # Install bpf-linker early on
 RUN cargo install bpf-linker
 
-# Add nightly toolchain for eBPF
-RUN rustup toolchain install nightly --component rust-src
+FROM chef-base AS chef-arm64
+WORKDIR /app
+
+# In Arm, an external LLVM (version 19) is requried to build bpf-linker
+# Note that the package we add is for bookworm, so need the chef-base stage to be consistent with that.
+RUN curl https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
+    printf "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-19 main\ndeb-src http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-19 main\n" >>/etc/apt/sources.list && \
+    apt update && \
+    apt install -y libzstd-dev llvm-19-dev libclang-19-dev libpolly-19-dev
+
+# Install bpf-linker with external LLVM
+RUN cargo install bpf-linker --no-default-features
+
+FROM chef-${TARGETARCH} as chef
 
 FROM chef AS planner
 # Copy cargo files first to cache dependencies
