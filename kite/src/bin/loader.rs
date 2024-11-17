@@ -4,7 +4,7 @@ use clap::Parser;
 use env_logger::fmt::Formatter;
 use kite::{
     cgroup2,
-    ebpf::{load_and_attach_kite_ebpf, AggregatedMetric, SharedStats},
+    ebpf::{AggregatedMetric, KiteEbpf, SharedStats},
     utils::{check_kernel_supported, try_remove_rlimit},
 };
 use log::{info, Record};
@@ -97,7 +97,7 @@ pub async fn main() -> anyhow::Result<()> {
 
     try_remove_rlimit();
 
-    let kite = load_and_attach_kite_ebpf(&cgroup_path).await?;
+    let kite = KiteEbpf::load(&cgroup_path).await?;
 
     // Start the periodic task to print statistics
     tokio::spawn(print_stats(kite.stats(), opt.stats_interval));

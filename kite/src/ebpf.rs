@@ -159,7 +159,62 @@ pub struct KiteEbpf {
 }
 
 impl KiteEbpf {
-    pub async fn new(mut ebpf: Ebpf, cgroup_path: PathBuf) -> KiteEbpf {
+    /// Loads the ebpf programs into the kernel and attaching them to the cgroup_path.
+    pub async fn load(cgroup_path: &Path) -> anyhow::Result<KiteEbpf> {
+        info!("Loading program for cgroup path: {:?}", cgroup_path);
+
+        let mut ebpf = Ebpf::load(aya::include_bytes_aligned!(concat!(
+            env!("OUT_DIR"),
+            "/kite"
+        )))?;
+
+        let cgroup_file = std::fs::File::open(cgroup_path)
+            .with_context(|| format!("Failed to open cgroup file: {:?}", cgroup_path))?;
+
+        aya_log::EbpfLogger::init(&mut ebpf).context("Failed to initialize eBPF logger")?;
+
+        let mut loaded_progs = Vec::new();
+        // Load and attach the ingress cgroup skb program
+        let program_ig: &mut CgroupSkb = ebpf
+            .program_mut("kite_ingress")
+            .context("Failed to get program")?
+            .try_into()?;
+        program_ig.load()?;
+        program_ig.attach(
+            cgroup_file.try_clone()?,
+            CgroupSkbAttachType::Ingress,
+            CgroupAttachMode::default(),
+        )?;
+        loaded_progs.push("kite_ingress");
+
+        // Load and attach the egress cgroup skb program
+        let program_eg: &mut CgroupSkb = ebpf
+            .program_mut("kite_egress")
+            .context("Failed to get program")?
+            .try_into()?;
+        program_eg.load()?;
+        program_eg.attach(
+            cgroup_file.try_clone()?,
+            CgroupSkbAttachType::Egress,
+            CgroupAttachMode::default(),
+        )?;
+        loaded_progs.push("kite_egress");
+
+        // Load and attach the egress cgroup sock program
+        let program_sock_release: &mut CgroupSock = ebpf
+            .program_mut("kite_sock_release")
+            .context("Failed to get program")?
+            .try_into()?;
+        program_sock_release.load()?;
+        program_sock_release.attach(cgroup_file.try_clone()?, CgroupAttachMode::default())?;
+        loaded_progs.push("kite_sock_release");
+
+        info!("Successfully loadded ebpf with programs {:?}", loaded_progs);
+
+        Ok(KiteEbpf::new(ebpf, cgroup_path.to_owned()).await)
+    }
+
+    async fn new(mut ebpf: Ebpf, cgroup_path: PathBuf) -> KiteEbpf {
         let stats = Arc::new(Mutex::new(HashMap::new()));
         let collector_tasks = spawn_collectors(&mut ebpf, stats.clone())
             .await
@@ -197,60 +252,6 @@ impl Drop for KiteEbpf {
             task.abort();
         }
     }
-}
-/// Code for loading the ebpf programs into the kernel.
-pub async fn load_and_attach_kite_ebpf(cgroup_path: &Path) -> anyhow::Result<KiteEbpf> {
-    info!("Loading program for cgroup path: {:?}", cgroup_path);
-
-    let mut ebpf = Ebpf::load(aya::include_bytes_aligned!(concat!(
-        env!("OUT_DIR"),
-        "/kite"
-    )))?;
-
-    let cgroup_file = std::fs::File::open(cgroup_path)
-        .with_context(|| format!("Failed to open cgroup file: {:?}", cgroup_path))?;
-
-    aya_log::EbpfLogger::init(&mut ebpf).context("Failed to initialize eBPF logger")?;
-
-    let mut loaded_progs = Vec::new();
-    // Load and attach the ingress cgroup skb program
-    let program_ig: &mut CgroupSkb = ebpf
-        .program_mut("kite_ingress")
-        .context("Failed to get program")?
-        .try_into()?;
-    program_ig.load()?;
-    program_ig.attach(
-        cgroup_file.try_clone()?,
-        CgroupSkbAttachType::Ingress,
-        CgroupAttachMode::default(),
-    )?;
-    loaded_progs.push("kite_ingress");
-
-    // Load and attach the egress cgroup skb program
-    let program_eg: &mut CgroupSkb = ebpf
-        .program_mut("kite_egress")
-        .context("Failed to get program")?
-        .try_into()?;
-    program_eg.load()?;
-    program_eg.attach(
-        cgroup_file.try_clone()?,
-        CgroupSkbAttachType::Egress,
-        CgroupAttachMode::default(),
-    )?;
-    loaded_progs.push("kite_egress");
-
-    // Load and attach the egress cgroup sock program
-    let program_sock_release: &mut CgroupSock = ebpf
-        .program_mut("kite_sock_release")
-        .context("Failed to get program")?
-        .try_into()?;
-    program_sock_release.load()?;
-    program_sock_release.attach(cgroup_file.try_clone()?, CgroupAttachMode::default())?;
-    loaded_progs.push("kite_sock_release");
-
-    info!("Successfully loadded ebpf with programs {:?}", loaded_progs);
-
-    Ok(KiteEbpf::new(ebpf, cgroup_path.to_owned()).await)
 }
 
 /// Convenience struct to manage multiple eBPF programs and their stats.

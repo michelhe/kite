@@ -8,7 +8,7 @@ use tokio::{
 
 use crate::{
     cgroup2::find_cgroup2_mount,
-    ebpf::{load_and_attach_kite_ebpf, KiteEbpf, SharedEbpfManager},
+    ebpf::{KiteEbpf, SharedEbpfManager},
     ipc::messages::PodHelloMessage,
 };
 
@@ -66,7 +66,17 @@ async fn handle_pod_hello_message(
         pod.metadata.name,
         pod_cgroup_path
     );
-    load_and_attach_kite_ebpf(&pod_cgroup_path).await
+
+    let ebpf = KiteEbpf::load(&pod_cgroup_path).await?;
+
+    tracing::info!(
+        "Successfully loaded program for pod: {pod:?} in namespace {namespace:?} with UID={uid:?}",
+        pod = pod.metadata.name,
+        namespace = pod.metadata.namespace,
+        uid = pod.metadata.uid
+    );
+
+    Ok(ebpf)
 }
 
 pub async fn start_init_hook_server(
