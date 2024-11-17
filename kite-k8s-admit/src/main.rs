@@ -129,7 +129,7 @@ pub(self) fn execute_rules(
 async fn pods_handler(
     req: AdmissionRequest<DynamicObject>,
     config: &Config,
-) -> anyhow::Result<reply::Json> {
+) -> anyhow::Result<AdmissionReview<DynamicObject>> {
     // Extract the Pod from the request
     let pod: Pod = req
         .clone()
@@ -154,9 +154,7 @@ async fn pods_handler(
             "Skipping pod {:?} because no patches are required",
             pod.metadata.name
         );
-        return Ok(warp::reply::json(
-            &AdmissionResponse::from(&req).into_review(),
-        ));
+        return Ok(AdmissionResponse::from(&req).into_review());
     }
 
     // Add a label to the pod to indicate that it has been patched
@@ -183,18 +181,16 @@ async fn pods_handler(
     tracing::debug!("Admission Handler response {:?}", response);
 
     // Return the response
-    Ok(warp::reply::json(&response.into_review()))
+    Ok(response.into_review())
 }
 
 /// The deployments handler is responsible for injecting the kite.io/app-name label into the pod template of the deployment.
 async fn deployments_handler(
     req: AdmissionRequest<DynamicObject>,
     config: &Config,
-) -> anyhow::Result<reply::Json> {
+) -> anyhow::Result<AdmissionReview<DynamicObject>> {
     if !config.inject_app_name_labels {
-        return Ok(warp::reply::json(
-            &AdmissionResponse::from(&req).into_review(),
-        ));
+        return Ok(AdmissionResponse::from(&req).into_review());
     }
 
     let deployment = req
@@ -218,7 +214,7 @@ async fn deployments_handler(
         .with_patch(Patch(patches))?
         .into_review();
 
-    Ok(warp::reply::json(&review))
+    Ok(review)
 }
 
 /// This function is responsible for handling the admission of pods.
@@ -226,7 +222,7 @@ async fn deployments_handler(
 async fn admission_handler(
     body: AdmissionReview<DynamicObject>,
     config: &Config,
-) -> anyhow::Result<reply::Json> {
+) -> anyhow::Result<AdmissionReview<DynamicObject>> {
     tracing::trace!("Admission Handler request {:?}", body);
 
     // Parse incoming webhook AdmissionRequest first
@@ -237,9 +233,7 @@ async fn admission_handler(
         if let Some(labels) = obj.metadata.labels.as_ref() {
             if labels.get(LABEL_PATCHED).is_some() {
                 tracing::warn!("Skipping {kind:?} {name:?} in namespace {namespace:?} because it was already patched", kind=req.kind.kind, name=obj.metadata.name, namespace=obj.metadata.namespace);
-                return Ok(warp::reply::json(
-                    &AdmissionResponse::from(&req).into_review(),
-                ));
+                return Ok(AdmissionResponse::from(&req).into_review());
             }
         }
     }
@@ -287,7 +281,7 @@ async fn webhook_task(port: u16, config_file: PathBuf, tls: Option<TlsArgs>) {
                 let config = Config::from_file(&config_file).unwrap();
 
                 match admission_handler(body, &config).await {
-                    Ok(reply) => Ok::<warp::reply::Json, Infallible>(reply),
+                    Ok(review) => Ok::<warp::reply::Json, Infallible>(reply::json(&review)),
                     Err(err) => {
                         tracing::error!("Error: {:?}", err);
                         let res = AdmissionResponse::invalid(err.to_string());
