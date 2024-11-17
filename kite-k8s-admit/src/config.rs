@@ -66,7 +66,13 @@ impl PatchRule {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Config {
+    /// The rules field is a list of PatchRule objects. Each PatchRule object contains a list of patches and a list of selectors.
     pub rules: Vec<PatchRule>,
+
+    /// Inject app name labels
+    #[serde(rename = "injectAppNameLabels")]
+    #[serde(default)]
+    pub inject_app_name_labels: bool,
 }
 
 impl Config {

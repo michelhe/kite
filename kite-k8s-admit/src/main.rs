@@ -6,7 +6,7 @@ use clap::Parser;
 use config::{Config, PatchRule};
 use json_patch::{AddOperation, Patch, PatchOperation};
 use jsonptr::Pointer;
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::{apps::v1::Deployment, core::v1::Pod};
 use kube::{
     core::{
         admission::{AdmissionRequest, AdmissionResponse, AdmissionReview},
@@ -14,6 +14,7 @@ use kube::{
     },
     ResourceExt,
 };
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::json;
 use tracing::{info, Level};
 use warp::{reply, Filter};
@@ -22,6 +23,7 @@ mod config;
 
 /// The label that indicates that the pod has been patched by the admission controller already.
 pub const LABEL_PATCHED: &str = "kite.io/patched";
+pub const LABEL_APP_NAME: &str = "kite.io/app-name";
 
 /// Per RFC 6901, If the currently referenced value is a JSON array, the reference token MUST contain either
 /// 1. characters comprised of digits (see ABNF below; note that leading zeros are not allowed)
@@ -35,16 +37,19 @@ fn is_referencing_an_array(token: &jsonptr::Token) -> bool {
             && token.decoded().chars().next() != Some('0')
 }
 
-/// Implictly create non-existent documents in the pod JSON and initialize them with an empty value.
-/// This function creates the missing documents as PatchOperation::Add operations.
-/// The pod object is consumed and returned in the patched form along with the PatchOperations that were created.
-fn patch_and_fill_default_values(
-    pod: Pod,
+/// Apply's the JSON patches to the object and returns the patched object.
+/// NOTE: We implictly create non-existent documents in the object JSON and initialize them with an empty value.
+/// The object is consumed and returned in the patched form along with the PatchOperations that were created.
+fn patch_and_fill_default_values<T>(
+    obj: T,
     patches: &[PatchOperation],
-) -> anyhow::Result<(Pod, Vec<PatchOperation>)> {
+) -> anyhow::Result<(T, Vec<PatchOperation>)>
+where
+    T: Serialize + DeserializeOwned,
+{
     let mut result = Vec::new();
 
-    let mut pod_value = serde_json::to_value(pod)?;
+    let mut obj_value = serde_json::to_value(obj)?;
 
     for patch in patches {
         let mut ops = vec![];
@@ -55,7 +60,7 @@ fn patch_and_fill_default_values(
             continue;
         }
 
-        match path.resolve(&pod_value) {
+        match path.resolve(&obj_value) {
             Err(jsonptr::Error::NotFound(not_found)) => {
                 let missing = not_found.pointer;
 
@@ -86,14 +91,25 @@ fn patch_and_fill_default_values(
         }
         ops.push(patch.clone());
 
-        json_patch::patch(&mut pod_value, &ops)?;
+        json_patch::patch(&mut obj_value, &ops)?;
         result.extend(ops.into_iter());
     }
 
-    Ok((serde_json::from_value(pod_value)?, result))
+    Ok((serde_json::from_value(obj_value)?, result))
 }
 
-/// Evaluate patch rules against the pod and return all that patches that should be applied.
+pub fn get_matching_rules(
+    rules: &[PatchRule],
+    labels: &std::collections::BTreeMap<String, String>,
+) -> Vec<PatchRule> {
+    rules
+        .iter()
+        .filter(|rule| rule.is_matching(labels))
+        .cloned()
+        .collect()
+}
+
+/// Execute the patches defined by the rules on the object
 pub(self) fn execute_rules(
     rules: &[PatchRule],
     mut pod: Pod,
@@ -110,17 +126,10 @@ pub(self) fn execute_rules(
     Ok(pod)
 }
 
-/// This function is responsible for handling the admission of pods.
-/// For now, we only want to add an annotation to the pod. Later, we will attach an initContainer that will be responsible for attaching the eBPF program to the pod.
-async fn admission_handler(
-    body: AdmissionReview<DynamicObject>,
+async fn pods_handler(
+    req: AdmissionRequest<DynamicObject>,
     config: &Config,
 ) -> anyhow::Result<reply::Json> {
-    tracing::trace!("Admission Handler request {:?}", body);
-
-    // Parse incoming webhook AdmissionRequest first
-    let req: AdmissionRequest<DynamicObject> = body.try_into()?;
-
     // Extract the Pod from the request
     let pod: Pod = req
         .clone()
@@ -136,16 +145,6 @@ async fn admission_handler(
         pod.metadata.name,
         pod.metadata.namespace
     );
-
-    // If the pod template is already patched for some reason, skip it
-    if let Some(labels) = &pod.metadata.labels {
-        if labels.get(LABEL_PATCHED).is_some() {
-            tracing::warn!("Skipping pod {:?} because it was already patched", pod,);
-            return Ok(warp::reply::json(
-                &AdmissionResponse::from(&req).into_review(),
-            ));
-        }
-    }
 
     let mut patches = Vec::new();
     let pod = execute_rules(&config.rules, pod, &mut patches)?;
@@ -185,6 +184,71 @@ async fn admission_handler(
 
     // Return the response
     Ok(warp::reply::json(&response.into_review()))
+}
+
+/// The deployments handler is responsible for injecting the kite.io/app-name label into the pod template of the deployment.
+async fn deployments_handler(
+    req: AdmissionRequest<DynamicObject>,
+    config: &Config,
+) -> anyhow::Result<reply::Json> {
+    if !config.inject_app_name_labels {
+        return Ok(warp::reply::json(
+            &AdmissionResponse::from(&req).into_review(),
+        ));
+    }
+
+    let deployment = req
+        .clone()
+        .object
+        .ok_or(anyhow!("No object in request"))?
+        .try_parse::<Deployment>()?;
+
+    let mut patches: Vec<PatchOperation> = Vec::new();
+    let mut labels_ptr = Pointer::new(["spec", "template", "metadata", "labels"]);
+    labels_ptr.push_back(LABEL_APP_NAME.into());
+    patches.push(serde_json::from_value(json!({
+        "op": "add",
+        "path": labels_ptr,
+        "value": deployment.metadata.name,
+    }))?);
+
+    let (_, patches) = patch_and_fill_default_values(deployment, &patches)?;
+
+    let review = AdmissionResponse::from(&req)
+        .with_patch(Patch(patches))?
+        .into_review();
+
+    Ok(warp::reply::json(&review))
+}
+
+/// This function is responsible for handling the admission of pods.
+/// For now, we only want to add an annotation to the pod. Later, we will attach an initContainer that will be responsible for attaching the eBPF program to the pod.
+async fn admission_handler(
+    body: AdmissionReview<DynamicObject>,
+    config: &Config,
+) -> anyhow::Result<reply::Json> {
+    tracing::trace!("Admission Handler request {:?}", body);
+
+    // Parse incoming webhook AdmissionRequest first
+    let req: AdmissionRequest<DynamicObject> = body.try_into()?;
+
+    // If the pod template is already patched for some reason, skip it
+    if let Some(obj) = &req.object {
+        if let Some(labels) = obj.metadata.labels.as_ref() {
+            if labels.get(LABEL_PATCHED).is_some() {
+                tracing::warn!("Skipping {kind:?} {name:?} in namespace {namespace:?} because it was already patched", kind=req.kind.kind, name=obj.metadata.name, namespace=obj.metadata.namespace);
+                return Ok(warp::reply::json(
+                    &AdmissionResponse::from(&req).into_review(),
+                ));
+            }
+        }
+    }
+
+    match req.kind.kind.as_str() {
+        "Pod" => pods_handler(req, config).await,
+        "Deployment" => deployments_handler(req, config).await,
+        _ => Err(anyhow!("Unsupported resource type {}", req.kind.kind)),
+    }
 }
 
 #[derive(clap::Args, Debug, Clone)]

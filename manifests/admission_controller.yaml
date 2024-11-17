@@ -103,10 +103,12 @@ webhooks:
         path: /webhook
     rules:
       - apiGroups:
+          - "apps"
           - ""
         apiVersions:
           - "v1"
         resources:
+          - "deployments"
           - "pods"
         operations:
           - "CREATE"
