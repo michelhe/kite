@@ -27,7 +27,7 @@ RUN curl https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
 # Install bpf-linker with external LLVM
 RUN cargo install bpf-linker --no-default-features
 
-FROM chef-${TARGETARCH} as chef
+FROM chef-${TARGETARCH} AS chef
 
 FROM chef AS planner
 # Copy cargo files first to cache dependencies
