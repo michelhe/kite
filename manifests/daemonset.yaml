@@ -74,6 +74,8 @@ spec:
           env:
             - name: RUST_BACKTRACE
               value: "full"
+            - name: RUST_LOG
+              value: DEBUG
             - name: KITE_POD_NAME
               valueFrom:
                 fieldRef:
