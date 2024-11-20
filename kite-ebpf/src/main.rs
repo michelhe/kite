@@ -192,7 +192,7 @@ fn try_kite<const INGRESS: bool>(ctx: &SkBuffContext) -> Result<i32, i64> {
 
                     let event = HTTPRequestEvent { conn, duration_ns };
                     EVENTS.output(ctx, &event, 0);
-                    (*data).total_time_ns += duration_ns;
+                    KITE_CONTRACK.remove(&cookie)?; // Remove to avoid memory leak.
                 }
             },
             None => {
