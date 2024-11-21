@@ -35,6 +35,7 @@ pub struct KiteDaemonArgs {
 
 async fn print_stats(ebpf_manager: SharedEbpfManager) {
     let mut interval = interval(Duration::from_secs(5));
+    interval.tick().await; // Skip the first tick as it is always 0
     loop {
         let start = tokio::time::Instant::now();
         interval.tick().await;
