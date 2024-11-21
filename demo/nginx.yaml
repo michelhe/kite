@@ -57,3 +57,26 @@ spec:
       port: 80
       targetPort: 80
   type: LoadBalancer
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx-spammer
+  namespace: default
+spec:
+  initContainers:
+    - name: wait-for-service
+      image: busybox:1.28
+      command:
+        [
+          "sh",
+          "-c",
+          "until nslookup webserver-service.$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace).svc.cluster.local; do echo waiting for webserver-service; sleep 2; done;",
+        ]
+  containers:
+  - name: spammer
+    image: busybox:latest
+    command: ["/bin/sh", "-c"]
+    args:
+      - server_host=webserver-service.$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace).svc.cluster.local; while true; do wget -O - http://${server_host} >/dev/null 2>&1 ; done;

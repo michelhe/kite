@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: slow-server
+spec:
+  selector:
+    matchLabels:
+      app: slow-server
+  template:
+    metadata:
+      labels:
+        app: slow-server
+    spec:
+      containers:
+      - name: slow-server
+        image: python:3.12
+        command: ["python3", "/app/slow-server.py"]
+        resources:
+          limits:
+            memory: "128Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: scripts
+          mountPath: /app
+        ports:
+        - containerPort: 1337
+      volumes:
+      - name: scripts
+        configMap:
+          name: slow-server
+
+
+# Create a ConfigMap with inline python script at app/slow-server.py
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: slow-server
+data:
+  slow-server.py: |
+    import os
+    import time
+    import random
+    from http.server import SimpleHTTPRequestHandler, HTTPServer
+
+    LISTEN_PORT = os.getenv('LISTEN_PORT', 1337)
+    MAX_SLEEP = os.getenv('MAX_SLEEP', 1)
+
+    def slow():
+        sleep_time = random.random() * MAX_SLEEP
+        time.sleep(sleep_time)
+
+    class SlowHandler(SimpleHTTPRequestHandler):
+        def do_GET(self):
+            slow()
+            super().do_GET()
+
+        def do_POST(self):
+            slow()
+            super().do_POST()
+
+    if __name__ == "__main__":
+        server_address = ('', LISTEN_PORT)
+        httpd = HTTPServer(server_address, SlowHandler)
+        print(f"Starting slow HTTP server on port {LISTEN_PORT}...")
+        httpd.serve_forever()
+
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: slow-server-service
+spec:
+  selector:
+    app: slow-server
+  ports:
+  - port: 1337
+    targetPort: 1337
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: slow-server-spammer
+  namespace: default
+spec:
+  initContainers:
+    - name: wait-for-service
+      image: busybox:1.28
+      command:
+        [
+          "sh",
+          "-c",
+          "until nslookup slow-server-service.$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace).svc.cluster.local; do echo waiting for slow-server-service; sleep 2; done;",
+        ]
+  containers:
+  - name: spammer
+    image: busybox:latest
+    command: ["/bin/sh", "-c"]
+    args:
+      - server_host=slow-server-service.$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace).svc.cluster.local; while true; do wget -O - http://${server_host}:1337  >/dev/null 2>&1 ; done;
