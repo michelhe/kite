@@ -32,14 +32,13 @@ struct Opt {
 
 async fn print_stats(stats: SharedStats, stats_interval: u64) {
     let mut interval = interval(Duration::from_secs(stats_interval));
+    interval.tick().await; // Skip the first tick as it is always 0
     loop {
         let start = tokio::time::Instant::now();
         interval.tick().await;
 
         let mut stats = stats.lock().await;
-        let stats_copy = stats.clone();
-        *stats = Default::default();
-        drop(stats);
+        let stats_copy = std::mem::replace(&mut *stats, Default::default());
 
         for (endpoint, mut s) in stats_copy.into_iter() {
             let latency = AggregatedMetric::from(s.take_latencies());
