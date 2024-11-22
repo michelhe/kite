@@ -3,7 +3,7 @@ use std::time::Duration;
 use clap::Parser;
 use kite::{
     daemon::start_init_hook_server,
-    ebpf::{AggregatedMetric, SharedEbpfManager},
+    ebpf::SharedEbpfManager,
     ipc::get_kite_sock,
     utils::{check_kernel_supported, try_remove_rlimit},
 };
@@ -43,9 +43,9 @@ async fn print_stats(ebpf_manager: SharedEbpfManager) {
             let kite_stats = kite.stats();
             let mut stats = kite_stats.lock().await;
             let stats_copy = std::mem::replace(&mut *stats, Default::default());
-            for (endpoint, mut s) in stats_copy.into_iter() {
+            for (endpoint, s) in stats_copy.into_iter() {
                 let rps = s.request_count() / start.elapsed().as_secs();
-                let latency: AggregatedMetric<u64> = s.take_latencies().into();
+                let latency = s.latencies.aggregated();
                 info!(
                     "[{}] Stats for {:?}:{} RPS: {}, Latency {} ms",
                     ident, endpoint.addr, endpoint.port, rps, latency,

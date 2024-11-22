@@ -4,7 +4,8 @@ use clap::Parser;
 use env_logger::fmt::Formatter;
 use kite::{
     cgroup2,
-    ebpf::{AggregatedMetric, KiteEbpf, SharedStats},
+    ebpf::KiteEbpf,
+    stats::SharedStatsMap,
     utils::{check_kernel_supported, try_remove_rlimit},
 };
 use log::{info, Record};
@@ -30,7 +31,7 @@ struct Opt {
     enable_aya_obj_logs: bool,
 }
 
-async fn print_stats(stats: SharedStats, stats_interval: u64) {
+async fn print_stats(stats: SharedStatsMap, stats_interval: u64) {
     let mut interval = interval(Duration::from_secs(stats_interval));
     interval.tick().await; // Skip the first tick as it is always 0
     loop {
@@ -40,8 +41,8 @@ async fn print_stats(stats: SharedStats, stats_interval: u64) {
         let mut stats = stats.lock().await;
         let stats_copy = std::mem::replace(&mut *stats, Default::default());
 
-        for (endpoint, mut s) in stats_copy.into_iter() {
-            let latency = AggregatedMetric::from(s.take_latencies());
+        for (endpoint, s) in stats_copy.into_iter() {
+            let latency = s.latencies.aggregated();
             let rps = s.request_count() / start.elapsed().as_secs();
             info!(
                 "{}:{} - RPS: {}, Latency {} ms",
