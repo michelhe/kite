@@ -37,7 +37,7 @@ COPY Cargo.lock .
 # Copy every workspace member's Cargo.toml as well
 COPY kite/Cargo.toml kite/Cargo.toml
 COPY kite-ebpf/Cargo.toml kite-ebpf/Cargo.toml
-COPY kite-ebpf-common/Cargo.toml kite-ebpf-common/Cargo.toml
+COPY kite-ebpf-types/Cargo.toml kite-ebpf-types/Cargo.toml
 COPY kite-k8s-admit/Cargo.toml kite-k8s-admit/Cargo.toml
 
 COPY kite-ebpf/.cargo/config.toml kite-ebpf/.cargo/config.toml
@@ -56,7 +56,7 @@ RUN cargo chef cook --release --recipe-path recipe.json
 # Copy the source code into the container
 COPY kite/ ./kite/
 COPY kite-ebpf/ ./kite-ebpf/
-COPY kite-ebpf-common ./kite-ebpf-common/
+COPY kite-ebpf-types ./kite-ebpf-types/
 COPY kite-k8s-admit/ ./kite-k8s-admit/
 
 # Build the project for release

@@ -21,7 +21,7 @@ use num_traits::PrimInt;
 use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::bytes::BytesMut;
 
-pub use kite_ebpf_common::{Endpoint as LowLevelEndpoint, HTTPRequestEvent};
+pub use kite_ebpf_types::{Endpoint as LowLevelEndpoint, HTTPRequestEvent};
 
 #[derive(Debug, Default, Clone)]
 pub struct Stats {

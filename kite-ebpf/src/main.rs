@@ -10,7 +10,7 @@ use aya_ebpf::{
     EbpfContext,
 };
 use aya_log_ebpf::{debug, error, warn};
-use kite_ebpf_common::{Connection, Endpoint, HTTPRequestEvent};
+use kite_ebpf_types::{Connection, Endpoint, HTTPRequestEvent};
 
 mod bindings;
 use bindings::{iphdr, tcphdr};

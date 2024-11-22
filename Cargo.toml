@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["kite", "kite-k8s-admit", "kite-ebpf", "kite-ebpf-common"]
-default-members = ["kite", "kite-ebpf-common", "kite-k8s-admit"]
+members = ["kite", "kite-k8s-admit", "kite-ebpf", "kite-ebpf-types"]
+default-members = ["kite", "kite-ebpf-types", "kite-k8s-admit"]
 
 [workspace.dependencies]
 clap = { version = "4.5.20", features = ["derive"] }
