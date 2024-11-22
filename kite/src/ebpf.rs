@@ -287,4 +287,19 @@ impl EbpfManager {
             .await
             .remove(cgroup_path.to_string_lossy().as_ref());
     }
+
+    pub async fn cleanup_exited_cgroups(&mut self) -> Vec<String> {
+        let mut to_remove = Vec::new();
+        for (ident, kite) in self.ebpfs.lock().await.iter() {
+            if !kite.cgroup_path().exists() {
+                to_remove.push(ident.clone());
+            }
+        }
+
+        for ident in to_remove.iter() {
+            self.ebpfs.lock().await.remove(ident);
+        }
+
+        to_remove
+    }
 }

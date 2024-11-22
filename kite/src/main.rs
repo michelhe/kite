@@ -85,7 +85,8 @@ async fn main() -> anyhow::Result<()> {
 
     let ebpf_m = kite::ebpf::EbpfManager::new_shared();
     let ebpf_m_2 = ebpf_m.clone();
-    // Spawn the init hook server in the background
+    let ebpf_m_3 = ebpf_m.clone();
+
     tokio::spawn(async move {
         let r = start_init_hook_server(&kite_sock, ebpf_m.clone()).await;
         if let Err(e) = r {
@@ -94,6 +95,18 @@ async fn main() -> anyhow::Result<()> {
     });
 
     tokio::spawn(print_stats(ebpf_m_2.clone()));
+
+    tokio::spawn(async move {
+        let mut interval = interval(Duration::from_secs(5));
+        interval.tick().await; // Skip the first tick as it is always 0
+        loop {
+            interval.tick().await;
+            let removed = ebpf_m_3.lock().await.cleanup_exited_cgroups().await;
+            if !removed.is_empty() {
+                tracing::info!("Removed {} ebpfs", removed.len());
+            }
+        }
+    });
 
     tracing::info!("Kite Daemon started, press Ctrl+C to stop");
 
