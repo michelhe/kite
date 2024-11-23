@@ -27,7 +27,7 @@ pub struct PatchRule {
 
 /// Perform the label selector logic to determine if the pod should be selected.
 /// matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
-pub(self) fn run_match_labels(
+fn run_match_labels(
     labels: &BTreeMap<String, String>,
     match_labels: &BTreeMap<String, String>,
 ) -> bool {

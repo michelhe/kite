@@ -33,8 +33,7 @@ pub const LABEL_APP_NAME: &str = "kite.io/app-name";
 ///    after the last array element.
 fn is_referencing_an_array(token: &jsonptr::Token) -> bool {
     token.decoded() == "-"
-        || token.decoded().chars().all(char::is_numeric)
-            && token.decoded().chars().next() != Some('0')
+        || token.decoded().chars().all(char::is_numeric) && !token.decoded().starts_with('0')
 }
 
 /// Apply's the JSON patches to the object and returns the patched object.
@@ -110,7 +109,7 @@ pub fn get_matching_rules(
 }
 
 /// Execute the patches defined by the rules on the object
-pub(self) fn execute_rules(
+fn execute_rules(
     rules: &[PatchRule],
     mut pod: Pod,
     patches: &mut Vec<PatchOperation>,

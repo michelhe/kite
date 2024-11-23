@@ -73,7 +73,7 @@ where
 
 impl<N: PrimInt + Default + Sum> From<Vec<N>> for AggregatedMetric<N> {
     fn from(value: Vec<N>) -> Self {
-        if value.len() == 0 {
+        if value.is_empty() {
             return Self::default();
         }
         let mut sorted = value;

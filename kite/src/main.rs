@@ -41,7 +41,7 @@ async fn print_stats(ebpf_manager: SharedEbpfManager) {
         for kite in ebpf_manager.lock().await.ebpfs.values() {
             let kite_stats = kite.stats();
             let mut stats = kite_stats.lock().await;
-            let stats_copy = std::mem::replace(&mut *stats, Default::default());
+            let stats_copy = std::mem::take(&mut *stats);
             for (endpoint, s) in stats_copy.into_iter() {
                 let rps = s.request_count() / start.elapsed().as_secs();
                 let latency = s.latencies.aggregated();

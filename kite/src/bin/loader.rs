@@ -40,7 +40,7 @@ async fn print_stats(stats: SharedStatsMap, stats_interval: u64) {
         interval.tick().await;
 
         let mut stats = stats.lock().await;
-        let stats_copy = std::mem::replace(&mut *stats, Default::default());
+        let stats_copy = std::mem::take(&mut *stats);
 
         for (endpoint, s) in stats_copy.into_iter() {
             let latency = s.latencies.aggregated();
