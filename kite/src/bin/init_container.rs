@@ -17,7 +17,9 @@ async fn inner_main() -> anyhow::Result<()> {
     let pod_name = env::var(kite::k8s::consts::ENV_KITE_POD_NAME)?;
     let namespace = env::var(kite::k8s::consts::ENV_KITE_POD_NAMESPACE)?;
 
-    let message = kite_ipc::messages::PodHelloMessage::new(pod_name, namespace);
+    let message = kite_ipc::Message::PodHelloMessage(kite_ipc::messages::PodHelloMessage::new(
+        pod_name, namespace,
+    ));
 
     info!("Sending message to daemon: {:?}", message);
 

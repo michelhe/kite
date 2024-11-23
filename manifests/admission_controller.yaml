@@ -128,6 +128,9 @@ data:
   config.yaml: |
     rules:
     - selectors:
+        include:
+          matchLabels:
+            app: slow-server
         exclude:
           matchLabels:
             kite.io/no-patch: "1"

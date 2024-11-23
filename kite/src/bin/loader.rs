@@ -1,4 +1,8 @@
-use std::{io::Write, path::PathBuf, time::Duration};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use clap::Parser;
 use env_logger::fmt::Formatter;
@@ -14,9 +18,6 @@ use tokio::time::interval;
 #[derive(Parser)]
 /// A simple standalone version of kite. The will load the eBPF program and print statistics.
 struct Opt {
-    /// The identifier of the cgroup. i.e In k8s this will be {pod}-{namespace}
-    ident: String,
-
     /// The path to the cgroup that the eBPF program should attach to.
     /// Defaults to the root cgroup mount. Or you can specify a custom path.
     #[arg(short, long, required = false, default_value = "root")]
@@ -52,9 +53,10 @@ async fn print_stats(stats: SharedStatsMap, stats_interval: u64) {
     }
 }
 
-fn init_logger(opt: &Opt) -> anyhow::Result<()> {
+fn init_logger(opt: &Opt, cgroup_path: &Path) -> anyhow::Result<()> {
     let mut builder = env_logger::Builder::from_default_env();
-    let ident = opt.ident.clone();
+    let cgroup_path = cgroup_path.to_owned();
+    let ident = format!("cgroup={}", cgroup_path.display());
     builder
         .format(move |buf: &mut Formatter, record: &Record| {
             writeln!(
@@ -81,17 +83,15 @@ fn init_logger(opt: &Opt) -> anyhow::Result<()> {
 #[tokio::main]
 pub async fn main() -> anyhow::Result<()> {
     let opt = Opt::parse();
-    init_logger(&opt)?;
 
     let cgroup_path = match opt.cgroup_path.as_str() {
         "root" => cgroup2::find_cgroup2_mount(),
         _ => PathBuf::from(&opt.cgroup_path),
     };
 
-    info!(
-        "Starting loader on cgroup {:?} with ident: {}",
-        &cgroup_path, opt.ident
-    );
+    init_logger(&opt, &cgroup_path)?;
+
+    info!("Starting loader on cgroup {:?}", &cgroup_path);
 
     check_kernel_supported()?;
 

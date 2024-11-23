@@ -2,7 +2,8 @@
 //! The eBPF programs are attached to cgroups collect the stats of the HTTP requests made to the pods.
 //! See loader.rs for a simple example of how to use this module.
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
+    ops::Deref,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -171,49 +172,82 @@ impl Drop for KiteEbpf {
     }
 }
 
+pub struct ManagedEbpf {
+    ebpf: KiteEbpf,
+    pub ident: String,
+}
+
+impl Deref for ManagedEbpf {
+    type Target = KiteEbpf;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ebpf
+    }
+}
+
 /// Convenience struct to manage multiple eBPF programs and their stats.
+#[derive(Default)]
 pub struct EbpfManager {
-    /// identifer -> ebpf,
-    pub ebpfs: Arc<Mutex<HashMap<String, KiteEbpf>>>,
+    /// cgroup -> ebpf,
+    pub ebpfs: BTreeMap<PathBuf, ManagedEbpf>,
 }
 
 pub type SharedEbpfManager = Arc<Mutex<EbpfManager>>;
 
 impl EbpfManager {
     pub fn new_shared() -> SharedEbpfManager {
-        Arc::new(Mutex::new(EbpfManager {
-            ebpfs: Arc::new(Mutex::new(HashMap::new())),
-        }))
+        Arc::new(Mutex::new(Default::default()))
     }
 
-    pub async fn add(&self, ident: String, kite: KiteEbpf) {
-        self.ebpfs.lock().await.insert(ident.to_string(), kite);
+    /// Attach the eBPF programs to the cgroup_path and store them in the manager.
+    /// The ident is an opaque string that can be used to identify the eBPF programs.
+    pub async fn attach_to_cgroup(
+        &mut self,
+        cgroup_path: &Path,
+        ident: String,
+    ) -> anyhow::Result<()> {
+        if let Some(existing_cgroup) = self
+            .ebpfs
+            .keys()
+            .find(|&existing_cgroup| cgroup_path.starts_with(existing_cgroup))
+        {
+            let msg = format!(
+                "Cgroup path {:?} is already tracked by parent cgroup {:?}",
+                cgroup_path, existing_cgroup
+            );
+            warn!("{}", msg);
+            return Err(anyhow::anyhow!(msg));
+        }
+
+        let ebpf = KiteEbpf::load(cgroup_path).await?;
+
+        self.ebpfs
+            .insert(cgroup_path.to_owned(), ManagedEbpf { ebpf, ident });
+
+        Ok(())
     }
 
-    pub async fn drop_all(&self) {
-        let mut ebpfs = self.ebpfs.lock().await;
+    pub async fn drop_all(&mut self) {
+        let mut ebpfs = std::mem::take(&mut self.ebpfs);
         ebpfs.clear();
     }
 
-    pub async fn drop(&self, cgroup_path: &Path) {
-        self.ebpfs
-            .lock()
-            .await
-            .remove(cgroup_path.to_string_lossy().as_ref());
+    pub async fn drop(&mut self, cgroup_path: &Path) {
+        self.ebpfs.remove(cgroup_path);
     }
 
-    pub async fn cleanup_exited_cgroups(&mut self) -> Vec<String> {
-        let mut to_remove = Vec::new();
-        for (ident, kite) in self.ebpfs.lock().await.iter() {
-            if !kite.cgroup_path().exists() {
-                to_remove.push(ident.clone());
+    /// Cleanup all the eBPF programs that are attached to cgroups that no longer exist.
+    /// Return paths of the cgroups that were removed.
+    pub async fn cleanup_exited_cgroups(&mut self) -> Vec<PathBuf> {
+        let mut removed_paths = Vec::new();
+
+        for cgroup_path in self.ebpfs.keys().cloned().collect::<Vec<_>>() {
+            if !cgroup_path.exists() {
+                self.ebpfs.remove(&cgroup_path);
+                removed_paths.push(cgroup_path);
             }
         }
 
-        for ident in to_remove.iter() {
-            self.ebpfs.lock().await.remove(ident);
-        }
-
-        to_remove
+        removed_paths
     }
 }

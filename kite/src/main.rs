@@ -2,9 +2,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use kite::{
-    daemon::start_init_hook_server,
     ebpf::SharedEbpfManager,
-    ipc::get_kite_sock,
+    ipc::{get_kite_sock, ipc_server_task},
     utils::{check_kernel_supported, try_remove_rlimit},
 };
 use tokio::time::interval;
@@ -39,7 +38,7 @@ async fn print_stats(ebpf_manager: SharedEbpfManager) {
     loop {
         let start = tokio::time::Instant::now();
         interval.tick().await;
-        for (ident, kite) in ebpf_manager.lock().await.ebpfs.lock().await.iter() {
+        for kite in ebpf_manager.lock().await.ebpfs.values() {
             let kite_stats = kite.stats();
             let mut stats = kite_stats.lock().await;
             let stats_copy = std::mem::replace(&mut *stats, Default::default());
@@ -48,7 +47,7 @@ async fn print_stats(ebpf_manager: SharedEbpfManager) {
                 let latency = s.latencies.aggregated();
                 info!(
                     "[{}] Stats for {:?}:{} RPS: {}, Latency {} ms",
-                    ident, endpoint.addr, endpoint.port, rps, latency,
+                    kite.ident, endpoint.addr, endpoint.port, rps, latency,
                 );
             }
         }
@@ -88,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
     let ebpf_m_3 = ebpf_m.clone();
 
     tokio::spawn(async move {
-        let r = start_init_hook_server(&kite_sock, ebpf_m.clone()).await;
+        let r = ipc_server_task(&kite_sock, ebpf_m.clone()).await;
         if let Err(e) = r {
             tracing::error!("Error starting init hook server: {:?}", e);
         }
