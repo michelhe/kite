@@ -149,82 +149,82 @@ fn try_kite<const INGRESS: bool>(ctx: &SkBuffContext) -> Result<i32, i64> {
         }
     };
 
-    unsafe {
-        match KITE_CONTRACK.get_ptr_mut(&cookie) {
-            Some(data) => match INGRESS {
-                true => {
-                    debug!(
-                        ctx,
-                        "New request on the same socket {:i}:{} -> {:i}:{}",
-                        conn.src.addr,
-                        conn.src.port,
-                        conn.dst.addr,
-                        conn.dst.port,
-                    );
+    match KITE_CONTRACK.get_ptr_mut(&cookie) {
+        Some(data) => match INGRESS {
+            true => {
+                debug!(
+                    ctx,
+                    "New request on the same socket {:i}:{} -> {:i}:{}",
+                    conn.src.addr,
+                    conn.src.port,
+                    conn.dst.addr,
+                    conn.dst.port,
+                );
+                unsafe {
                     (*data).request_count += 1;
                     (*data).last_request_time_ns = bpf_ktime_get_ns();
                 }
-                false => {
-                    let start_time_ns = (*data).last_request_time_ns;
-                    let end_time_ns = bpf_ktime_get_ns();
-                    let duration_ns = if end_time_ns < start_time_ns {
-                        warn!(
-                            ctx,
-                            "Negative duration for {:i}:{} -> {:i}:{}",
-                            conn.src.addr,
-                            conn.src.port,
-                            conn.dst.addr,
-                            conn.dst.port,
-                        );
-                        0
-                    } else {
-                        end_time_ns - start_time_ns
-                    };
-                    debug!(
+            }
+            false => {
+                let start_time_ns = unsafe { (*data).last_request_time_ns };
+                let end_time_ns = unsafe { bpf_ktime_get_ns() };
+                let duration_ns = if end_time_ns < start_time_ns {
+                    warn!(
                         ctx,
-                        "Response from {:i}:{} -> {:i}:{} took {}ms",
-                        conn.src.addr,
-                        conn.src.port,
-                        conn.dst.addr,
-                        conn.dst.port,
-                        duration_ns / 1_000_000,
-                    );
-
-                    let event = HTTPRequestEvent { conn, duration_ns };
-                    EVENTS.output(ctx, &event, 0);
-                    KITE_CONTRACK.remove(&cookie)?; // Remove to avoid memory leak.
-                }
-            },
-            None => {
-                if INGRESS {
-                    debug!(
-                        ctx,
-                        "New request from {:i}:{} -> {:i}:{}",
+                        "Negative duration for {:i}:{} -> {:i}:{}",
                         conn.src.addr,
                         conn.src.port,
                         conn.dst.addr,
                         conn.dst.port,
                     );
-                    let data = ConnectionData {
-                        conn,
-                        request_count: 1,
-                        total_time_ns: 0,
-                        last_request_time_ns: bpf_ktime_get_ns(),
-                    };
-                    KITE_CONTRACK.insert(&cookie, &data, BPF_F_NO_PREALLOC as u64)?;
+                    0
                 } else {
-                    debug!(
-                        ctx,
-                        "Response without request from {}:{} to {}:{}",
-                        conn.src.addr,
-                        conn.src.port,
-                        conn.dst.addr,
-                        conn.dst.port,
-                    );
-                }
+                    end_time_ns - start_time_ns
+                };
+                debug!(
+                    ctx,
+                    "Response from {:i}:{} -> {:i}:{} took {}ms",
+                    conn.src.addr,
+                    conn.src.port,
+                    conn.dst.addr,
+                    conn.dst.port,
+                    duration_ns / 1_000_000,
+                );
+
+                let event = HTTPRequestEvent { conn, duration_ns };
+                EVENTS.output(ctx, &event, 0);
+                KITE_CONTRACK.remove(&cookie)?; // Remove to avoid memory leak.
+            }
+        },
+        None => {
+            if INGRESS {
+                debug!(
+                    ctx,
+                    "New request from {:i}:{} -> {:i}:{}",
+                    conn.src.addr,
+                    conn.src.port,
+                    conn.dst.addr,
+                    conn.dst.port,
+                );
+                let data = ConnectionData {
+                    conn,
+                    request_count: 1,
+                    total_time_ns: 0,
+                    last_request_time_ns: unsafe { bpf_ktime_get_ns() },
+                };
+                KITE_CONTRACK.insert(&cookie, &data, BPF_F_NO_PREALLOC as u64)?;
+            } else {
+                debug!(
+                    ctx,
+                    "Response without request from {}:{} to {}:{}",
+                    conn.src.addr,
+                    conn.src.port,
+                    conn.dst.addr,
+                    conn.dst.port,
+                );
             }
         }
-    };
+    }
 
     Ok(SK_PASS)
 }
