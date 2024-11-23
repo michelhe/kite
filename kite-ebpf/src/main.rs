@@ -10,7 +10,7 @@ use aya_ebpf::{
     EbpfContext,
 };
 use aya_log_ebpf::{debug, error, warn};
-use kite_ebpf_types::{Connection, Endpoint, HTTPRequestEvent};
+use kite_ebpf_types::{Connection, Endpoint, HTTPRequest, HTTPRequestEvent};
 
 mod bindings;
 use bindings::{iphdr, tcphdr};
@@ -191,7 +191,7 @@ fn try_kite<const INGRESS: bool>(ctx: &SkBuffContext) -> Result<i32, i64> {
                     duration_ns / 1_000_000,
                 );
 
-                let event = HTTPRequestEvent { conn, duration_ns };
+                let event = HTTPRequestEvent::Inbound(HTTPRequest { conn, duration_ns });
                 EVENTS.output(ctx, &event, 0);
                 KITE_CONTRACK.remove(&cookie)?; // Remove to avoid memory leak.
             }

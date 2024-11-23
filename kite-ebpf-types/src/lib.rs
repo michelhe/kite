@@ -37,12 +37,19 @@ impl Connection {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HTTPRequest {
+    pub conn: Connection,
+    pub duration_ns: u64,
+}
+
 /// An event representing a measurment of a single HTTP request.
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HTTPRequestEvent {
-    pub conn: Connection,
-    pub duration_ns: u64,
+pub enum HTTPRequestEvent {
+    Outbound(HTTPRequest),
+    Inbound(HTTPRequest),
     // TODO: bytes sent/received, CPU time, etc.
 }
 

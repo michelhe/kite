@@ -22,11 +22,18 @@ use crate::stats::{Endpoint, SharedStatsMap};
 pub use kite_ebpf_types::{Endpoint as LowLevelEndpoint, HTTPRequestEvent};
 
 async fn process_event(event: HTTPRequestEvent, stats: SharedStatsMap) {
-    let dst = Endpoint::from(event.conn.dst);
-    let mut stats = stats.lock().await;
-    let entry = (*stats).entry(dst).or_default();
-    entry.request_count += 1;
-    entry.latencies.push(event.duration_ns / 1_000_000); // Convert ns to ms
+    match event {
+        HTTPRequestEvent::Inbound(req) => {
+            let dst = Endpoint::from(req.conn.dst);
+            let mut stats = stats.lock().await;
+            let entry = (*stats).entry(dst).or_default();
+            entry.request_count += 1;
+            entry.latencies.push(req.duration_ns / 1_000_000); // Convert ns to ms
+        }
+        HTTPRequestEvent::Outbound(req) => {
+            tracing::error!("Outbound request event not supported yet: {:?}", req);
+        }
+    }
 }
 
 async fn spawn_collectors(
