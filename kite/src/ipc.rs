@@ -147,11 +147,12 @@ pub async fn ipc_server_task(kite_sock: &Path, ebpf_m: SharedEbpfManager) -> any
                         "Failed to get pod from Kubernetes API. Make sure the pod is running and the kubelet is reachable.",
                         )?;
 
+                        // Note we are prefixing the labels with "kite/k8s/" to avoid conflicts with other labels from scrapers.
                         let extra_labels = [
-                            ("pod".to_string(), pod_name.clone()),
-                            ("namespace".to_string(), namespace.clone()),
+                            ("kite/k8s/pod".to_string(), pod_name.clone()),
+                            ("kite/k8s/namespace".to_string(), namespace.clone()),
                             (
-                                "app".to_string(),
+                                "kite/k8s/app".to_string(),
                                 get_app_name(&pod).unwrap_or("<UNKNOWN>".to_string()),
                             ),
                         ];
