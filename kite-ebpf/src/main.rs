@@ -22,7 +22,7 @@ const IPPROTO_TCP: u8 = 6;
 
 const SK_PASS: i32 = 1;
 
-struct ParsedHeaders {
+struct ParsedTcp {
     ip: iphdr,
     tcp: tcphdr,
     data_offset: usize,
@@ -49,7 +49,7 @@ static KITE_CONTRACK: HashMap<u64, HTTPConnectionData> =
 #[map]
 static EVENTS: PerfEventArray<HTTPRequestEvent> = PerfEventArray::new(0);
 
-fn is_tcp(ctx: &SkBuffContext) -> Result<Option<ParsedHeaders>, i64> {
+fn parse_tcp(ctx: &SkBuffContext) -> Result<Option<ParsedTcp>, i64> {
     let protocol = unsafe { (*ctx.skb.skb).protocol };
 
     // TODO: Support IPv6
@@ -68,7 +68,7 @@ fn is_tcp(ctx: &SkBuffContext) -> Result<Option<ParsedHeaders>, i64> {
 
     let tcp_hlen = tcp.doff() as usize * 4;
 
-    Ok(Some(ParsedHeaders {
+    Ok(Some(ParsedTcp {
         ip,
         tcp,
         data_offset: ip_hlen + tcp_hlen,
@@ -82,12 +82,12 @@ enum HTTPDetection {
     Response,
 }
 
-fn detect_http(ctx: &SkBuffContext, headers: &ParsedHeaders) -> Result<Option<HTTPDetection>, i64> {
-    if headers.data_size < 8 {
+fn detect_http(ctx: &SkBuffContext, tcp: &ParsedTcp) -> Result<Option<HTTPDetection>, i64> {
+    if tcp.data_size < 8 {
         return Ok(None);
     }
 
-    let data = ctx.load::<[u8; 8]>(headers.data_offset)?;
+    let data = ctx.load::<[u8; 8]>(tcp.data_offset)?;
 
     match (
         data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
@@ -167,6 +167,7 @@ fn finish_tracking_http_request(
         data.bytes_out + data.bytes_in,
     );
 
+    // TODO we need to account for the response size as well, for that we need to track the socket till the response is sent.
     let event = HTTPRequestEvent {
         event_kind: data.kind,
         total_bytes: data.bytes_out + data.bytes_in, // TODO: Split to bytes_out and bytes_in
@@ -190,22 +191,16 @@ pub fn kite_ingress(ctx: SkBuffContext) -> i32 {
 }
 
 fn ingress_main(ctx: &SkBuffContext) -> Result<i32, i64> {
-    let maybe_headers = is_tcp(&ctx)?;
-    if maybe_headers.is_none() {
+    let maybe_tcp = parse_tcp(&ctx)?;
+    if maybe_tcp.is_none() {
         return Ok(SK_PASS);
     }
-    let headers = maybe_headers.unwrap(); // Safe to unwrap because we checked for None
-    let http_detection = detect_http(&ctx, &headers)?;
+    let tcp = maybe_tcp.unwrap(); // Safe to unwrap because we checked for None
+    let http_detection = detect_http(&ctx, &tcp)?;
 
     let conn = Connection::new(
-        Endpoint::new(
-            u32::from_be(headers.ip.saddr),
-            u16::from_be(headers.tcp.source),
-        ),
-        Endpoint::new(
-            u32::from_be(headers.ip.daddr),
-            u16::from_be(headers.tcp.dest),
-        ),
+        Endpoint::new(u32::from_be(tcp.ip.saddr), u16::from_be(tcp.tcp.source)),
+        Endpoint::new(u32::from_be(tcp.ip.daddr), u16::from_be(tcp.tcp.dest)),
     );
 
     let cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr()) };
@@ -237,14 +232,14 @@ fn ingress_main(ctx: &SkBuffContext) -> Result<i32, i64> {
             };
 
             // Begin tracking this connection.
-            begin_tracking_http_request(conn, cookie, 0, headers.data_size, kind)?;
+            begin_tracking_http_request(conn, cookie, 0, tcp.data_size, kind)?;
         }
         Some(data) => {
             // We have seen this connection before.
 
             // Account for the size of the packet.
             unsafe {
-                (*data).bytes_in += headers.data_size;
+                (*data).bytes_in += tcp.data_size;
             }
 
             match http_detection {
@@ -286,23 +281,17 @@ pub fn kite_egress(ctx: SkBuffContext) -> i32 {
 }
 
 fn egress_main(ctx: &SkBuffContext) -> Result<i32, i64> {
-    let maybe_headers = is_tcp(&ctx)?;
-    if maybe_headers.is_none() {
+    let maybe_tcp = parse_tcp(&ctx)?;
+    if maybe_tcp.is_none() {
         return Ok(SK_PASS);
     }
-    let headers = maybe_headers.unwrap(); // Safe to unwrap because we checked for None
-    let http_detection = detect_http(&ctx, &headers)?;
+    let tcp = maybe_tcp.unwrap(); // Safe to unwrap because we checked for None
+    let http_detection = detect_http(&ctx, &tcp)?;
 
     // In the egress program, the source and destination are reversed because the packet is going out.
     let conn = Connection::new(
-        Endpoint::new(
-            u32::from_be(headers.ip.daddr),
-            u16::from_be(headers.tcp.dest),
-        ),
-        Endpoint::new(
-            u32::from_be(headers.ip.saddr),
-            u16::from_be(headers.tcp.source),
-        ),
+        Endpoint::new(u32::from_be(tcp.ip.daddr), u16::from_be(tcp.tcp.dest)),
+        Endpoint::new(u32::from_be(tcp.ip.saddr), u16::from_be(tcp.tcp.source)),
     );
 
     let cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr()) };
@@ -333,14 +322,14 @@ fn egress_main(ctx: &SkBuffContext) -> Result<i32, i64> {
             };
 
             // Begin tracking this connection.
-            begin_tracking_http_request(conn, cookie, headers.data_size, 0, kind)?;
+            begin_tracking_http_request(conn, cookie, tcp.data_size, 0, kind)?;
         }
         Some(data) => {
             // We have seen this connection before.
 
             // Account for the size of the packet.
             unsafe {
-                (*data).bytes_out += headers.data_size;
+                (*data).bytes_out += tcp.data_size;
             }
 
             match http_detection {
