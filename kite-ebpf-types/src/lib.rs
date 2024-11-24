@@ -55,6 +55,7 @@ pub struct HTTPRequestEvent {
     pub event_kind: HTTPEventKind,
     pub conn: Connection,
     pub duration_ns: u64,
+    /// TODO: This a slight lie for now, as we we are not actually measuring the data sent in the response body.
     pub total_bytes: usize,
     // TODO: bytes sent/received, CPU time, etc.
 }
