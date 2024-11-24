@@ -86,6 +86,11 @@ async fn main() -> anyhow::Result<()> {
     let args = KiteDaemonArgs::try_parse()?;
     info!("Parsed CLI arguments: {:?}", args);
 
+    // Install the AWS LC provider which may be needed by kube-rs
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .unwrap();
+
     try_remove_rlimit();
 
     check_kernel_supported()?;

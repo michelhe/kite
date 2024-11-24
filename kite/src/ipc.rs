@@ -138,12 +138,14 @@ pub async fn ipc_server_task(kite_sock: &Path, ebpf_m: SharedEbpfManager) -> any
 
                         let (pod_name, namespace) = (message.pod_name, message.namespace);
 
-                        let kube_client = kube::Client::try_default().await?;
-
-                        let pod =
-                            crate::k8s::pods::get_pod(kube_client, &pod_name, Some(&namespace))
-                                .await
-                                .context("Failed to get pod")?;
+                        let kube_client = kube::Client::try_default().await.context(
+                        "Failed to create Kubernetes client. Make sure the kubeconfig is correctly configured.",
+                        )?;
+                        let pods: kube::Api<k8s_openapi::api::core::v1::Pod> =
+                            kube::Api::namespaced(kube_client, &namespace);
+                        let pod = pods.get(&pod_name).await.context(
+                        "Failed to get pod from Kubernetes API. Make sure the pod is running and the kubelet is reachable.",
+                        )?;
 
                         let extra_labels = [
                             ("pod".to_string(), pod_name.clone()),
