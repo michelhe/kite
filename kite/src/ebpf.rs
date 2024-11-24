@@ -2,7 +2,7 @@
 //! The eBPF programs are attached to cgroups collect the stats of the HTTP requests made to the pods.
 //! See loader.rs for a simple example of how to use this module.
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     ops::Deref,
     path::{Path, PathBuf},
     sync::Arc,
@@ -14,31 +14,30 @@ use aya::{
     maps::AsyncPerfEventArray,
     programs::{CgroupAttachMode, CgroupSkb, CgroupSkbAttachType, CgroupSock},
 };
+use kite_ebpf_types::HTTPEventKind;
 use log::{debug, info, warn};
 use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::bytes::BytesMut;
 
-use crate::stats::{Endpoint, SharedStatsMap};
+use crate::stats::{Endpoint, SharedHTTPStats};
 pub use kite_ebpf_types::{Endpoint as LowLevelEndpoint, HTTPRequestEvent};
 
-async fn process_event(event: HTTPRequestEvent, stats: SharedStatsMap) {
-    match event {
-        HTTPRequestEvent::Inbound(req) => {
-            let dst = Endpoint::from(req.conn.dst);
-            let mut stats = stats.lock().await;
-            let entry = (*stats).entry(dst).or_default();
-            entry.request_count += 1;
-            entry.latencies.push(req.duration_ns / 1_000_000); // Convert ns to ms
-        }
-        HTTPRequestEvent::Outbound(req) => {
-            tracing::error!("Outbound request event not supported yet: {:?}", req);
-        }
-    }
+async fn process_event(event: HTTPRequestEvent, stats: SharedHTTPStats) {
+    let dst = Endpoint::from(event.conn.dst);
+    let mut stats = stats.lock().await;
+    let map = match event.event_kind {
+        HTTPEventKind::OutboundRequest => &mut stats.requests,
+        HTTPEventKind::InboundRequest => &mut stats.responses,
+    };
+    let entry = map.entry(dst).or_default();
+    entry.request_count += 1;
+    entry.total_bytes += event.total_bytes as u64;
+    entry.latencies.push(event.duration_ns / 1_000_000); // Convert ns to ms
 }
 
 async fn spawn_collectors(
     ebpf: &mut Ebpf,
-    stats: SharedStatsMap,
+    http_stats: SharedHTTPStats,
 ) -> anyhow::Result<Vec<JoinHandle<()>>> {
     let events_map = ebpf
         .take_map("EVENTS")
@@ -50,7 +49,7 @@ async fn spawn_collectors(
     for cpu_id in aya::util::online_cpus().map_err(|(_, error)| error)? {
         let mut buf = perf_array.open(cpu_id, None)?;
 
-        let stats = stats.clone();
+        let http_stats = http_stats.clone();
         let handle = tokio::task::spawn(async move {
             let mut buffers = (0..10)
                 .map(|_| BytesMut::with_capacity(1024))
@@ -62,7 +61,7 @@ async fn spawn_collectors(
                     let ptr = buf.as_ptr() as *const HTTPRequestEvent;
                     let data = unsafe { ptr.read_unaligned() };
 
-                    process_event(data, stats.clone()).await;
+                    process_event(data, http_stats.clone()).await;
                 }
             }
         });
@@ -77,7 +76,7 @@ pub struct KiteEbpf {
     ebpf: Ebpf,
     cgroup_path: PathBuf,
     collector_tasks: Vec<JoinHandle<()>>,
-    stats: SharedStatsMap,
+    http_stats: SharedHTTPStats,
 }
 
 impl KiteEbpf {
@@ -140,15 +139,15 @@ impl KiteEbpf {
     }
 
     async fn new(mut ebpf: Ebpf, cgroup_path: PathBuf) -> KiteEbpf {
-        let stats = Arc::new(Mutex::new(HashMap::new()));
-        let collector_tasks = spawn_collectors(&mut ebpf, stats.clone())
+        let http_stats = Arc::new(Mutex::new(Default::default()));
+        let collector_tasks = spawn_collectors(&mut ebpf, http_stats.clone())
             .await
             .expect("Failed to create event collectors");
         KiteEbpf {
             ebpf,
             cgroup_path,
             collector_tasks,
-            stats: stats.clone(),
+            http_stats,
         }
     }
 
@@ -164,8 +163,8 @@ impl KiteEbpf {
         &mut self.ebpf
     }
 
-    pub fn stats(&self) -> SharedStatsMap {
-        self.stats.clone()
+    pub fn http_stats(&self) -> SharedHTTPStats {
+        self.http_stats.clone()
     }
 }
 

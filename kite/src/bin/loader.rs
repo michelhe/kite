@@ -9,7 +9,7 @@ use env_logger::fmt::Formatter;
 use kite::{
     cgroup2,
     ebpf::KiteEbpf,
-    stats::SharedStatsMap,
+    stats::SharedHTTPStats,
     utils::{check_kernel_supported, try_remove_rlimit},
 };
 use log::{info, Record};
@@ -32,7 +32,7 @@ struct Opt {
     enable_aya_obj_logs: bool,
 }
 
-async fn print_stats(stats: SharedStatsMap, stats_interval: u64) {
+async fn print_stats(stats: SharedHTTPStats, stats_interval: u64) {
     let mut interval = interval(Duration::from_secs(stats_interval));
     interval.tick().await; // Skip the first tick as it is always 0
     loop {
@@ -42,12 +42,25 @@ async fn print_stats(stats: SharedStatsMap, stats_interval: u64) {
         let mut stats = stats.lock().await;
         let stats_copy = std::mem::take(&mut *stats);
 
-        for (endpoint, s) in stats_copy.into_iter() {
+        println!("--- Response stats ---");
+        for (endpoint, s) in stats_copy.responses.iter() {
             let latency = s.latencies.aggregated();
-            let rps = s.request_count() / start.elapsed().as_secs();
-            info!(
-                "{}:{} - RPS: {}, Latency {} ms",
-                endpoint.addr, endpoint.port, rps, latency
+            let rps = s.rps(start.elapsed().as_secs());
+            let mbps: u64 = s.mbps(start.elapsed().as_secs());
+            println!(
+                "{}:{} - RPS: {}, Latency {} ms, MBps {}",
+                endpoint.addr, endpoint.port, rps, latency, mbps
+            );
+        }
+
+        println!("--- Request stats ---");
+        for (endpoint, s) in stats_copy.requests.iter() {
+            let latency = s.latencies.aggregated();
+            let rps = s.rps(start.elapsed().as_secs());
+            let mbps: u64 = s.mbps(start.elapsed().as_secs());
+            println!(
+                "{}:{} - RPS: {}, Latency {} ms, MBps {}",
+                endpoint.addr, endpoint.port, rps, latency, mbps
             );
         }
     }
@@ -100,7 +113,7 @@ pub async fn main() -> anyhow::Result<()> {
     let kite = KiteEbpf::load(&cgroup_path).await?;
 
     // Start the periodic task to print statistics
-    tokio::spawn(print_stats(kite.stats(), opt.stats_interval));
+    tokio::spawn(print_stats(kite.http_stats(), opt.stats_interval));
 
     // NOTE: the Ebpf object must be kept in scope for the program to run and stay attached.
 

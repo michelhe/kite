@@ -23,6 +23,10 @@ pub struct Connection {
 }
 
 impl Connection {
+    pub fn new(src: Endpoint, dst: Endpoint) -> Self {
+        Self { src, dst }
+    }
+
     /// Returns a hash of the connection key. Note that we assume that the dest address is unique per port and always either 127.0.0.1 or 0.0.0.0.
     // pub fn hash(&self) -> u64 {
     //     let mut hash: u64 = 0;
@@ -38,18 +42,20 @@ impl Connection {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HTTPRequest {
-    pub conn: Connection,
-    pub duration_ns: u64,
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+pub enum HTTPEventKind {
+    OutboundRequest,
+    InboundRequest,
 }
 
 /// An event representing a measurment of a single HTTP request.
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HTTPRequestEvent {
-    Outbound(HTTPRequest),
-    Inbound(HTTPRequest),
+pub struct HTTPRequestEvent {
+    pub event_kind: HTTPEventKind,
+    pub conn: Connection,
+    pub duration_ns: u64,
+    pub total_bytes: usize,
     // TODO: bytes sent/received, CPU time, etc.
 }
 

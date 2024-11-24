@@ -39,15 +39,29 @@ async fn print_stats(ebpf_manager: SharedEbpfManager) {
         let start = tokio::time::Instant::now();
         interval.tick().await;
         for kite in ebpf_manager.lock().await.ebpfs.values() {
-            let kite_stats = kite.stats();
-            let mut stats = kite_stats.lock().await;
-            let stats_copy = std::mem::take(&mut *stats);
-            for (endpoint, s) in stats_copy.into_iter() {
-                let rps = s.request_count() / start.elapsed().as_secs();
+            let http_stats = kite.http_stats();
+            let mut http_stats = http_stats.lock().await;
+            let http_stats = std::mem::take(&mut *http_stats);
+
+            info!("[{}] --- Response stats ---", kite.ident);
+            for (endpoint, s) in http_stats.responses.iter() {
+                let rps = s.rps(start.elapsed().as_secs());
+                let mbps = s.mbps(start.elapsed().as_secs());
                 let latency = s.latencies.aggregated();
                 info!(
-                    "[{}] Stats for {:?}:{} RPS: {}, Latency {} ms",
-                    kite.ident, endpoint.addr, endpoint.port, rps, latency,
+                    "[{}] Stats for {:?}:{} RPS: {}, Latency {} ms, MBps {}",
+                    kite.ident, endpoint.addr, endpoint.port, rps, latency, mbps
+                );
+            }
+
+            info!("[{}] --- Requests stats ---", kite.ident);
+            for (endpoint, s) in http_stats.requests.iter() {
+                let rps = s.rps(start.elapsed().as_secs());
+                let mbps = s.mbps(start.elapsed().as_secs());
+                let latency = s.latencies.aggregated();
+                info!(
+                    "[{}] Stats for {:?}:{} RPS: {}, Latency {} ms, MBps {}",
+                    kite.ident, endpoint.addr, endpoint.port, rps, latency, mbps
                 );
             }
         }

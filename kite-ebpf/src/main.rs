@@ -10,7 +10,7 @@ use aya_ebpf::{
     EbpfContext,
 };
 use aya_log_ebpf::{debug, error, warn};
-use kite_ebpf_types::{Connection, Endpoint, HTTPRequest, HTTPRequestEvent};
+use kite_ebpf_types::{Connection, Endpoint, HTTPEventKind, HTTPRequestEvent};
 
 mod bindings;
 use bindings::{iphdr, tcphdr};
@@ -25,22 +25,25 @@ const SK_PASS: i32 = 1;
 struct ParsedHeaders {
     ip: iphdr,
     tcp: tcphdr,
-    ip_hlen: usize,
-    tcp_hlen: usize,
+    data_offset: usize,
+    data_size: usize,
 }
 
 #[repr(C)]
-pub struct ConnectionData {
-    pub conn: Connection,
-    pub request_count: usize,
-    pub total_time_ns: u64,
-    pub last_request_time_ns: u64,
+struct HTTPConnectionData {
+    conn: Connection,
+    kind: HTTPEventKind,
+    request_count: usize,
+    total_time_ns: u64,
+    bytes_out: usize,
+    bytes_in: usize,
+    last_request_time_ns: u64,
 }
 
 const MAX_CONNECTIONS: u32 = 10000;
 
 #[map]
-static KITE_CONTRACK: HashMap<u64, ConnectionData> =
+static KITE_CONTRACK: HashMap<u64, HTTPConnectionData> =
     HashMap::with_max_entries(MAX_CONNECTIONS, BPF_F_NO_PREALLOC);
 
 #[map]
@@ -68,160 +71,193 @@ fn is_tcp(ctx: &SkBuffContext) -> Result<Option<ParsedHeaders>, i64> {
     Ok(Some(ParsedHeaders {
         ip,
         tcp,
-        ip_hlen,
-        tcp_hlen,
+        data_offset: ip_hlen + tcp_hlen,
+        data_size: ctx.len() as usize - ip_hlen - tcp_hlen,
     }))
 }
 
-fn check_http<const INGRESS: bool>(
-    ctx: &SkBuffContext,
-    headers: &ParsedHeaders,
-) -> Result<bool, i64> {
-    let data_offset = headers.ip_hlen + headers.tcp_hlen;
-    let data_size = ctx.len() as usize - data_offset;
+#[derive(Clone, Copy)]
+enum HTTPDetection {
+    Request,
+    Response,
+}
 
-    if data_size < 8 {
-        return Ok(false);
+fn detect_http(ctx: &SkBuffContext, headers: &ParsedHeaders) -> Result<Option<HTTPDetection>, i64> {
+    if headers.data_size < 8 {
+        return Ok(None);
     }
 
-    let data = ctx.load::<[u8; 8]>(data_offset)?;
+    let data = ctx.load::<[u8; 8]>(headers.data_offset)?;
 
-    if INGRESS {
-        match (
-            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-        ) {
-            (b'G', b'E', b'T', b' ', _, _, _, _) => Ok(true),
-            (b'P', b'O', b'S', b'T', _, _, _, _) => Ok(true),
-            (b'P', b'U', b'T', b' ', _, _, _, _) => Ok(true),
-            (b'D', b'E', b'L', b'E', b'T', b'E', _, _) => Ok(true),
-            (b'H', b'E', b'A', b'D', _, _, _, _) => Ok(true),
-            (b'O', b'P', b'T', b'I', b'O', b'N', b'S', _) => Ok(true),
-            (b'C', b'O', b'N', b'N', b'E', b'C', b'T', _) => Ok(true),
-            (b'T', b'R', b'A', b'C', b'E', _, _, _) => Ok(true),
-            (b'P', b'A', b'T', b'C', b'H', _, _, _) => Ok(true),
-            _ => Ok(false),
-        }
+    match (
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+    ) {
+        (b'G', b'E', b'T', b' ', _, _, _, _) => Ok(Some(HTTPDetection::Request)),
+        (b'P', b'O', b'S', b'T', _, _, _, _) => Ok(Some(HTTPDetection::Request)),
+        (b'P', b'U', b'T', b' ', _, _, _, _) => Ok(Some(HTTPDetection::Request)),
+        (b'D', b'E', b'L', b'E', b'T', b'E', _, _) => Ok(Some(HTTPDetection::Request)),
+        (b'H', b'E', b'A', b'D', _, _, _, _) => Ok(Some(HTTPDetection::Request)),
+        (b'O', b'P', b'T', b'I', b'O', b'N', b'S', _) => Ok(Some(HTTPDetection::Request)),
+        (b'C', b'O', b'N', b'N', b'E', b'C', b'T', _) => Ok(Some(HTTPDetection::Request)),
+        (b'T', b'R', b'A', b'C', b'E', _, _, _) => Ok(Some(HTTPDetection::Request)),
+        (b'P', b'A', b'T', b'C', b'H', _, _, _) => Ok(Some(HTTPDetection::Request)),
+        (b'H', b'T', b'T', b'P', b'/', _, _, _) => Ok(Some(HTTPDetection::Response)),
+        _ => Ok(None),
+    }
+}
+
+/// A helper function to track the connection of an HTTP request in the ebpf map.
+fn begin_tracking_http_request(
+    conn: Connection,
+    cookie: u64,
+    bytes_out: usize,
+    bytes_in: usize,
+    kind: HTTPEventKind,
+) -> Result<i32, i64> {
+    let data = HTTPConnectionData {
+        conn,
+        kind,
+        request_count: 1,
+        total_time_ns: 0,
+        bytes_out,
+        bytes_in,
+        last_request_time_ns: unsafe { bpf_ktime_get_ns() },
+    };
+    KITE_CONTRACK.insert(&cookie, &data, BPF_F_NO_PREALLOC as u64)?;
+    Ok(0)
+}
+
+fn finish_tracking_http_request(
+    ctx: &SkBuffContext,
+    cookie: u64,
+    data: &HTTPConnectionData,
+    conn: Connection,
+) -> Result<i32, i64> {
+    let start_time_ns = data.last_request_time_ns;
+    let end_time_ns = unsafe { bpf_ktime_get_ns() };
+    let duration_ns = if end_time_ns < start_time_ns {
+        warn!(
+            ctx,
+            "Negative duration for {:i}:{} -> {:i}:{}",
+            conn.src.addr,
+            conn.src.port,
+            conn.dst.addr,
+            conn.dst.port,
+        );
+        0
     } else {
-        if (data[0], data[1], data[2], data[3], data[4]) == (b'H', b'T', b'T', b'P', b'/') {
-            Ok(true)
-        } else {
-            Ok(false)
+        end_time_ns - start_time_ns
+    };
+    debug!(
+        ctx,
+        "Response from {:i}:{} -> {:i}:{} took {}ms",
+        conn.src.addr,
+        conn.src.port,
+        conn.dst.addr,
+        conn.dst.port,
+        duration_ns / 1_000_000,
+    );
+
+    let event = HTTPRequestEvent {
+        event_kind: data.kind,
+        total_bytes: data.bytes_out + data.bytes_in, // TODO: Split to bytes_out and bytes_in
+        conn,
+        duration_ns,
+    };
+    EVENTS.output(ctx, &event, 0);
+    KITE_CONTRACK.remove(&cookie)?; // Remove to avoid memory leak.
+    Ok(0)
+}
+
+#[cgroup_skb]
+pub fn kite_ingress(ctx: SkBuffContext) -> i32 {
+    match ingress_main(&ctx) {
+        Ok(res) => res,
+        Err(err) => {
+            error!(&ctx, "Error: {}", err);
+            SK_PASS
         }
     }
 }
 
-fn try_kite<const INGRESS: bool>(ctx: &SkBuffContext) -> Result<i32, i64> {
+fn ingress_main(ctx: &SkBuffContext) -> Result<i32, i64> {
     let maybe_headers = is_tcp(&ctx)?;
     if maybe_headers.is_none() {
         return Ok(SK_PASS);
     }
     let headers = maybe_headers.unwrap(); // Safe to unwrap because we checked for None
+    let http_detection = detect_http(&ctx, &headers)?;
 
-    if !check_http::<INGRESS>(&ctx, &headers)? {
-        // Not an HTTP request or response, or not relevant for the current program attachment mode.
-        return Ok(SK_PASS);
-    }
+    let conn = Connection::new(
+        Endpoint::new(
+            u32::from_be(headers.ip.saddr),
+            u16::from_be(headers.tcp.source),
+        ),
+        Endpoint::new(
+            u32::from_be(headers.ip.daddr),
+            u16::from_be(headers.tcp.dest),
+        ),
+    );
 
     let cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr()) };
 
-    let conn = if INGRESS {
-        Connection {
-            src: Endpoint::new(
-                u32::from_be(headers.ip.saddr),
-                u16::from_be(headers.tcp.source),
-            ),
-            dst: Endpoint::new(
-                u32::from_be(headers.ip.daddr),
-                u16::from_be(headers.tcp.dest),
-            ),
-        }
-    } else {
-        // In the egress program, the source and destination are reversed because the packet is going out.
-        Connection {
-            src: Endpoint::new(
-                u32::from_be(headers.ip.daddr),
-                u16::from_be(headers.tcp.dest),
-            ),
-            dst: Endpoint::new(
-                u32::from_be(headers.ip.saddr),
-                u16::from_be(headers.tcp.source),
-            ),
-        }
-    };
-
     match KITE_CONTRACK.get_ptr_mut(&cookie) {
-        Some(data) => match INGRESS {
-            true => {
-                debug!(
-                    ctx,
-                    "New request on the same socket {:i}:{} -> {:i}:{}",
-                    conn.src.addr,
-                    conn.src.port,
-                    conn.dst.addr,
-                    conn.dst.port,
-                );
-                unsafe {
-                    (*data).request_count += 1;
-                    (*data).last_request_time_ns = bpf_ktime_get_ns();
-                }
+        None => {
+            // We haven't seen this connection before.
+
+            if http_detection.is_none() {
+                return Ok(SK_PASS);
             }
-            false => {
-                let start_time_ns = unsafe { (*data).last_request_time_ns };
-                let end_time_ns = unsafe { bpf_ktime_get_ns() };
-                let duration_ns = if end_time_ns < start_time_ns {
+            let http_detection = http_detection.unwrap();
+
+            let kind = match http_detection {
+                HTTPDetection::Request => HTTPEventKind::InboundRequest,
+                HTTPDetection::Response => {
+                    // We are seeing an HTTP response in the ingress program, which is unexpected.
+                    // This is likely a response to a request that was sent before the connection was tracked.
                     warn!(
                         ctx,
-                        "Negative duration for {:i}:{} -> {:i}:{}",
+                        "Unexpected response in ingress program from {:i}:{} -> {:i}:{}",
                         conn.src.addr,
                         conn.src.port,
                         conn.dst.addr,
                         conn.dst.port,
                     );
-                    0
-                } else {
-                    end_time_ns - start_time_ns
-                };
-                debug!(
-                    ctx,
-                    "Response from {:i}:{} -> {:i}:{} took {}ms",
-                    conn.src.addr,
-                    conn.src.port,
-                    conn.dst.addr,
-                    conn.dst.port,
-                    duration_ns / 1_000_000,
-                );
+                    return Ok(SK_PASS);
+                }
+            };
 
-                let event = HTTPRequestEvent::Inbound(HTTPRequest { conn, duration_ns });
-                EVENTS.output(ctx, &event, 0);
-                KITE_CONTRACK.remove(&cookie)?; // Remove to avoid memory leak.
+            // Begin tracking this connection.
+            begin_tracking_http_request(conn, cookie, 0, headers.data_size, kind)?;
+        }
+        Some(data) => {
+            // We have seen this connection before.
+
+            // Account for the size of the packet.
+            unsafe {
+                (*data).bytes_in += headers.data_size;
             }
-        },
-        None => {
-            if INGRESS {
-                debug!(
-                    ctx,
-                    "New request from {:i}:{} -> {:i}:{}",
-                    conn.src.addr,
-                    conn.src.port,
-                    conn.dst.addr,
-                    conn.dst.port,
-                );
-                let data = ConnectionData {
-                    conn,
-                    request_count: 1,
-                    total_time_ns: 0,
-                    last_request_time_ns: unsafe { bpf_ktime_get_ns() },
-                };
-                KITE_CONTRACK.insert(&cookie, &data, BPF_F_NO_PREALLOC as u64)?;
-            } else {
-                debug!(
-                    ctx,
-                    "Response without request from {}:{} to {}:{}",
-                    conn.src.addr,
-                    conn.src.port,
-                    conn.dst.addr,
-                    conn.dst.port,
-                );
+
+            match http_detection {
+                None => {
+                    // Probably a continuation of a previous request or response, account for its size.
+                }
+                Some(HTTPDetection::Request) => {
+                    // This skb is a new request on a connection we've seen before.
+                    warn!(
+                        ctx,
+                        "New request on the same socket {:i}:{} -> {:i}:{}",
+                        conn.src.addr,
+                        conn.src.port,
+                        conn.dst.addr,
+                        conn.dst.port,
+                    );
+                    return Ok(SK_PASS);
+                }
+                Some(HTTPDetection::Response) => {
+                    // This skb is a response to a request we've seen before.
+                    finish_tracking_http_request(ctx, cookie, unsafe { &*data }, conn)?;
+                }
             }
         }
     }
@@ -230,8 +266,8 @@ fn try_kite<const INGRESS: bool>(ctx: &SkBuffContext) -> Result<i32, i64> {
 }
 
 #[cgroup_skb]
-pub fn kite_ingress(ctx: SkBuffContext) -> i32 {
-    match try_kite::<true>(&ctx) {
+pub fn kite_egress(ctx: SkBuffContext) -> i32 {
+    match egress_main(&ctx) {
         Ok(res) => res,
         Err(err) => {
             error!(&ctx, "Error: {}", err);
@@ -240,15 +276,89 @@ pub fn kite_ingress(ctx: SkBuffContext) -> i32 {
     }
 }
 
-#[cgroup_skb]
-pub fn kite_egress(ctx: SkBuffContext) -> i32 {
-    match try_kite::<false>(&ctx) {
-        Ok(res) => res,
-        Err(err) => {
-            error!(&ctx, "Error: {}", err);
-            SK_PASS
+fn egress_main(ctx: &SkBuffContext) -> Result<i32, i64> {
+    let maybe_headers = is_tcp(&ctx)?;
+    if maybe_headers.is_none() {
+        return Ok(SK_PASS);
+    }
+    let headers = maybe_headers.unwrap(); // Safe to unwrap because we checked for None
+    let http_detection = detect_http(&ctx, &headers)?;
+
+    // In the egress program, the source and destination are reversed because the packet is going out.
+    let conn = Connection::new(
+        Endpoint::new(
+            u32::from_be(headers.ip.daddr),
+            u16::from_be(headers.tcp.dest),
+        ),
+        Endpoint::new(
+            u32::from_be(headers.ip.saddr),
+            u16::from_be(headers.tcp.source),
+        ),
+    );
+
+    let cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr()) };
+
+    match KITE_CONTRACK.get_ptr_mut(&cookie) {
+        None => {
+            // We haven't seen this connection before.
+
+            if http_detection.is_none() {
+                return Ok(SK_PASS);
+            }
+            let http_detection = http_detection.unwrap();
+
+            let kind = match http_detection {
+                HTTPDetection::Request => HTTPEventKind::OutboundRequest,
+                HTTPDetection::Response => {
+                    // This is likely a response to a request that was sent before the connection was tracked.
+                    warn!(
+                        ctx,
+                        "Unexpected response in egress program from {:i}:{} -> {:i}:{}",
+                        conn.src.addr,
+                        conn.src.port,
+                        conn.dst.addr,
+                        conn.dst.port,
+                    );
+                    return Ok(SK_PASS);
+                }
+            };
+
+            // Begin tracking this connection.
+            begin_tracking_http_request(conn, cookie, headers.data_size, 0, kind)?;
+        }
+        Some(data) => {
+            // We have seen this connection before.
+
+            // Account for the size of the packet.
+            unsafe {
+                (*data).bytes_in += headers.data_size;
+            }
+
+            match http_detection {
+                None => {
+                    // Probably a continuation of a previous request or response, account for its size.
+                }
+                Some(HTTPDetection::Request) => {
+                    // This skb is a new request on a connection we've seen before.
+                    warn!(
+                        ctx,
+                        "New request on the same socket {:i}:{} -> {:i}:{}",
+                        conn.src.addr,
+                        conn.src.port,
+                        conn.dst.addr,
+                        conn.dst.port,
+                    );
+                    return Ok(SK_PASS);
+                }
+                Some(HTTPDetection::Response) => {
+                    // This skb is a response to a request we've seen before.
+                    finish_tracking_http_request(ctx, cookie, unsafe { &*data }, conn)?;
+                }
+            }
         }
     }
+
+    Ok(SK_PASS)
 }
 
 const SOCK_PASS: i32 = 1;

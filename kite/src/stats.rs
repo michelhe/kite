@@ -46,6 +46,7 @@ impl Latencies {
 #[derive(Debug, Default, Clone)]
 pub struct Stats {
     pub request_count: u64,
+    pub total_bytes: u64,
     pub latencies: Latencies,
 }
 
@@ -56,6 +57,14 @@ impl Stats {
 
     pub fn latencies(&self) -> &[u64] {
         &self.latencies.0
+    }
+
+    pub fn mbps(&self, elapsed: u64) -> u64 {
+        self.total_bytes / elapsed / 1024 / 1024
+    }
+
+    pub fn rps(&self, elapsed: u64) -> u64 {
+        self.request_count / elapsed
     }
 }
 
@@ -105,4 +114,10 @@ impl fmt::Display for AggregatedMetric<u64> {
     }
 }
 
-pub type SharedStatsMap = Arc<Mutex<HashMap<Endpoint, Stats>>>;
+#[derive(Debug, Default)]
+pub struct HTTPStats {
+    pub requests: HashMap<Endpoint, Stats>,
+    pub responses: HashMap<Endpoint, Stats>,
+}
+
+pub type SharedHTTPStats = Arc<Mutex<HTTPStats>>;
