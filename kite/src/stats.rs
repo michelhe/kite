@@ -3,6 +3,7 @@ use std::{
     fmt,
     iter::Sum,
     net::{IpAddr, Ipv4Addr},
+    ops,
     sync::Arc,
 };
 
@@ -100,6 +101,20 @@ impl<N: PrimInt + Default + Sum> From<Vec<N>> for AggregatedMetric<N> {
             p90,
             p99,
             max,
+        }
+    }
+}
+
+impl ops::Div<u64> for AggregatedMetric<u64> {
+    type Output = Self;
+
+    fn div(self, rhs: u64) -> Self::Output {
+        Self {
+            avg: self.avg / rhs as f64,
+            p50: self.p50 / rhs,
+            p90: self.p90 / rhs,
+            p99: self.p99 / rhs,
+            max: self.max / rhs,
         }
     }
 }

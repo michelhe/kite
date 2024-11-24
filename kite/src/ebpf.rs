@@ -14,7 +14,7 @@ use aya::{
     programs::{CgroupAttachMode, CgroupSkb, CgroupSkbAttachType, CgroupSock},
 };
 use log::{debug, info, warn};
-use metrics::{counter, histogram};
+use metrics::{counter, histogram, IntoLabels, Label};
 use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::bytes::BytesMut;
 
@@ -24,8 +24,8 @@ pub use kite_ebpf_types::{Endpoint as LowLevelEndpoint, HTTPEventKind, HTTPReque
 async fn process_event(
     event: HTTPRequestEvent,
     stats: SharedHTTPStats,
-    ident: String,
     cgroup_path: PathBuf,
+    extra_labels: Arc<Vec<Label>>,
 ) {
     let dst = Endpoint::from(event.conn.dst);
     let mut stats = stats.lock().await;
@@ -36,30 +36,33 @@ async fn process_event(
     let entry = map.entry(dst).or_default();
     entry.request_count += 1;
     entry.total_bytes += event.total_bytes as u64;
-    let duration_ms = event.duration_ns / 1_000_000;
-    entry.latencies.push(duration_ms); // Convert ns to ms
+    let duration_ns = event.duration_ns;
+    entry.latencies.push(duration_ns); // Convert ns to ms
 
     let base_metric_name = match event.event_kind {
         HTTPEventKind::OutboundRequest => "kite.http.request.outbound",
         HTTPEventKind::InboundRequest => "kite.http.request.inbound",
     };
 
-    let labels = vec![
+    let base_labels = [
         ("endpoint", format!("{:?}", dst)),
-        ("app_id", ident),
         ("cgroup_path", cgroup_path.to_string_lossy().to_string()),
-    ];
+    ]
+    .into_labels();
 
-    histogram!(format!("{base_metric_name}.durtaion"), &labels).record(duration_ms as f64);
+    let labels = base_labels
+        .into_iter()
+        .chain(extra_labels.iter().cloned())
+        .map(|label| (label.key().to_string(), label.value().to_string()))
+        .collect::<Vec<_>>();
+
+    histogram!(format!("{base_metric_name}.durtaion"), &labels).record(duration_ns as f64);
     counter!(format!("{base_metric_name}.count"), &labels).increment(1);
     histogram!(format!("{base_metric_name}.bytes"), &labels).record(event.total_bytes as f64);
 }
 
 /// Container struct to hold the cgroup eBPF programs and stats.
 pub struct KiteEbpf {
-    /// An opaque identifier for the eBPF programs. This does not need to be unique.
-    ident: String,
-
     /// The path to the cgroup that the eBPF programs are attached to.
     cgroup_path: PathBuf,
 
@@ -71,11 +74,14 @@ pub struct KiteEbpf {
 
     /// The owned eBPF object to keep the programs loaded and attached as long as this object is alive.
     ebpf: aya::Ebpf,
+
+    /// Opaque labels to identify the eBPF programs. These are used in the metrics.
+    labels: Vec<Label>,
 }
 
 impl KiteEbpf {
     /// Loads the ebpf programs into the kernel and attaching them to the cgroup_path.
-    pub async fn load(cgroup_path: &Path, ident: String) -> anyhow::Result<KiteEbpf> {
+    pub async fn load(cgroup_path: &Path, labels: impl IntoLabels) -> anyhow::Result<KiteEbpf> {
         info!("Loading program for cgroup path: {:?}", cgroup_path);
 
         let mut ebpf = Ebpf::load(aya::include_bytes_aligned!(concat!(
@@ -129,17 +135,22 @@ impl KiteEbpf {
 
         info!("Successfully loadded ebpf with programs {:?}", loaded_progs);
 
-        KiteEbpf::new(ebpf, cgroup_path.to_owned(), ident).await
+        KiteEbpf::new(ebpf, cgroup_path.to_owned(), labels.into_labels()).await
     }
 
-    async fn new(ebpf: aya::Ebpf, cgroup_path: PathBuf, ident: String) -> anyhow::Result<Self> {
+    async fn new(
+        ebpf: aya::Ebpf,
+        cgroup_path: PathBuf,
+        labels: impl IntoLabels,
+    ) -> anyhow::Result<Self> {
         let http_stats = Arc::new(Mutex::new(Default::default()));
+        let labels = labels.into_labels();
         let mut ebpf = KiteEbpf {
-            ident,
             cgroup_path,
             collector_tasks: Vec::new(),
             http_stats,
             ebpf,
+            labels,
         };
         ebpf.spawn_collectors().await?;
         Ok(ebpf)
@@ -156,7 +167,7 @@ impl KiteEbpf {
         for cpu_id in aya::util::online_cpus().map_err(|(_, error)| error)? {
             let mut buf = perf_array.open(cpu_id, None)?;
 
-            let ident = self.ident.clone();
+            let extra_labels = Arc::new(self.copy_lables());
             let cgroup_path = self.cgroup_path.clone();
             let http_stats = self.http_stats();
             let handle = tokio::task::spawn(async move {
@@ -170,8 +181,13 @@ impl KiteEbpf {
                         let ptr = buf.as_ptr() as *const HTTPRequestEvent;
                         let data = unsafe { ptr.read_unaligned() };
 
-                        process_event(data, http_stats.clone(), ident.clone(), cgroup_path.clone())
-                            .await;
+                        process_event(
+                            data,
+                            http_stats.clone(),
+                            cgroup_path.clone(),
+                            extra_labels.clone(),
+                        )
+                        .await;
                     }
                 }
             });
@@ -197,8 +213,8 @@ impl KiteEbpf {
         self.http_stats.clone()
     }
 
-    pub fn ident(&self) -> &str {
-        &self.ident
+    pub fn copy_lables(&self) -> Vec<Label> {
+        self.labels.clone()
     }
 }
 
@@ -231,7 +247,7 @@ impl EbpfManager {
     pub async fn attach_to_cgroup(
         &mut self,
         cgroup_path: &Path,
-        ident: String,
+        extra_labels: impl IntoLabels,
     ) -> anyhow::Result<()> {
         if let Some(existing_cgroup) = self
             .ebpfs
@@ -246,7 +262,7 @@ impl EbpfManager {
             return Err(anyhow::anyhow!(msg));
         }
 
-        let ebpf = KiteEbpf::load(cgroup_path, ident).await?;
+        let ebpf = KiteEbpf::load(cgroup_path, extra_labels).await?;
 
         self.ebpfs.insert(cgroup_path.to_owned(), ebpf);
 

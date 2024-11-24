@@ -148,14 +148,23 @@ fn finish_tracking_http_request(
     } else {
         end_time_ns - start_time_ns
     };
+
+    let event_kind = data.kind;
+    let prefix = match event_kind {
+        HTTPEventKind::InboundRequest => "Inbound",
+        HTTPEventKind::OutboundRequest => "Outbound",
+    };
+
     debug!(
         ctx,
-        "Response from {:i}:{} -> {:i}:{} took {}ms",
+        "{} - {:i}:{} -> {:i}:{} took {}ms ({} bytes)",
+        prefix,
         conn.src.addr,
         conn.src.port,
         conn.dst.addr,
         conn.dst.port,
         duration_ns / 1_000_000,
+        data.bytes_out + data.bytes_in,
     );
 
     let event = HTTPRequestEvent {
@@ -331,7 +340,7 @@ fn egress_main(ctx: &SkBuffContext) -> Result<i32, i64> {
 
             // Account for the size of the packet.
             unsafe {
-                (*data).bytes_in += headers.data_size;
+                (*data).bytes_out += headers.data_size;
             }
 
             match http_detection {

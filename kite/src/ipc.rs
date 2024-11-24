@@ -12,7 +12,10 @@ use tokio::{
     net::UnixListener,
 };
 
-use crate::{ebpf::SharedEbpfManager, k8s::pods::get_pod_cgroup_from_pid};
+use crate::{
+    ebpf::SharedEbpfManager,
+    k8s::pods::{get_app_name, get_pod_cgroup_from_pid},
+};
 
 pub const ENV_KITE_SOCK: &str = "KITE_SOCK";
 
@@ -69,10 +72,6 @@ pub mod messages {
                 pod_name,
                 namespace,
             }
-        }
-
-        pub fn to_ident(&self) -> String {
-            format!("{}-{}", self.pod_name, self.namespace)
         }
     }
 }
@@ -134,26 +133,44 @@ pub async fn ipc_server_task(kite_sock: &Path, ebpf_m: SharedEbpfManager) -> any
                             peer_pid
                         );
 
-                        let ident = message.to_ident();
                         let cgroup_path = get_pod_cgroup_from_pid(peer_pid)
                             .context("Failed to get pod cgroup")?;
 
+                        let (pod_name, namespace) = (message.pod_name, message.namespace);
+
+                        let kube_client = kube::Client::try_default().await?;
+
+                        let pod =
+                            crate::k8s::pods::get_pod(kube_client, &pod_name, Some(&namespace))
+                                .await
+                                .context("Failed to get pod")?;
+
+                        let extra_labels = [
+                            ("pod".to_string(), pod_name.clone()),
+                            ("namespace".to_string(), namespace.clone()),
+                            (
+                                "app".to_string(),
+                                get_app_name(&pod).unwrap_or("<UNKNOWN>".to_string()),
+                            ),
+                        ];
+
                         tracing::debug!(
                             "Loading program for pod: {:?} on cgroup path: {:?}",
-                            message.pod_name,
+                            pod_name,
                             cgroup_path
                         );
+
                         ebpf_m_clone
                             .lock()
                             .await
-                            .attach_to_cgroup(&cgroup_path, ident)
+                            .attach_to_cgroup(&cgroup_path, &extra_labels)
                             .await
                             .context("Failed to attach ebpf to cgroup")?;
 
                         tracing::info!(
                             "Successfully loaded program for pod: {pod:?} in namespace {namespace:?}",
-                            pod = message.pod_name,
-                            namespace = message.namespace,
+                            pod = pod_name,
+                            namespace = namespace,
                         );
                     }
                 }

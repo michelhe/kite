@@ -44,35 +44,27 @@ async fn print_stats(ebpf_manager: SharedEbpfManager) {
             let mut http_stats = http_stats.lock().await;
             let http_stats = std::mem::take(&mut *http_stats);
 
-            info!("[{}] --- Response stats ---", kite.ident());
+            let extra_labels = kite.copy_lables();
+
+            info!("[{:?}] --- Response stats ---", extra_labels);
             for (endpoint, s) in http_stats.responses.iter() {
                 let rps = s.rps(start.elapsed().as_secs());
                 let mbps = s.mbps(start.elapsed().as_secs());
-                let latency = s.latencies.aggregated();
+                let latency_ms = s.latencies.aggregated() / 1_000_000u64;
                 info!(
-                    "[{}] Stats for {:?}:{} RPS: {}, Latency {} ms, MBps {}",
-                    kite.ident(),
-                    endpoint.addr,
-                    endpoint.port,
-                    rps,
-                    latency,
-                    mbps
+                    "{:?}:{} RPS: {}, Latency {} ms, MBps {}",
+                    endpoint.addr, endpoint.port, rps, latency_ms, mbps
                 );
             }
 
-            info!("[{}] --- Requests stats ---", kite.ident());
+            info!("[{:?}] --- Requests stats ---", extra_labels);
             for (endpoint, s) in http_stats.requests.iter() {
                 let rps = s.rps(start.elapsed().as_secs());
                 let mbps = s.mbps(start.elapsed().as_secs());
-                let latency = s.latencies.aggregated();
+                let latency_ms = s.latencies.aggregated() / 1_000_000u64;
                 info!(
-                    "[{}] Stats for {:?}:{} RPS: {}, Latency {} ms, MBps {}",
-                    kite.ident(),
-                    endpoint.addr,
-                    endpoint.port,
-                    rps,
-                    latency,
-                    mbps
+                    "[{:?}:{} RPS: {}, Latency {} ms, MBps {}",
+                    endpoint.addr, endpoint.port, rps, latency_ms, mbps
                 );
             }
         }

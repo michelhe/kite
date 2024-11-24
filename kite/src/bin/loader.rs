@@ -30,6 +30,9 @@ struct Opt {
     #[arg(long, action = clap::ArgAction::SetTrue, required = false)]
     /// Set if you want to see the spammy logs of the eBPF program ELF relocation.
     enable_aya_obj_logs: bool,
+
+    #[arg(long, action = clap::ArgAction::SetTrue, required = false)]
+    print_stats: bool,
 }
 
 async fn print_stats(stats: SharedHTTPStats, stats_interval: u64) {
@@ -44,23 +47,23 @@ async fn print_stats(stats: SharedHTTPStats, stats_interval: u64) {
 
         println!("--- Response stats ---");
         for (endpoint, s) in stats_copy.responses.iter() {
-            let latency = s.latencies.aggregated();
+            let latency_ms = s.latencies.aggregated() / 1_000_000u64;
             let rps = s.rps(start.elapsed().as_secs());
             let mbps: u64 = s.mbps(start.elapsed().as_secs());
             println!(
                 "{}:{} - RPS: {}, Latency {} ms, MBps {}",
-                endpoint.addr, endpoint.port, rps, latency, mbps
+                endpoint.addr, endpoint.port, rps, latency_ms, mbps
             );
         }
 
         println!("--- Request stats ---");
         for (endpoint, s) in stats_copy.requests.iter() {
-            let latency = s.latencies.aggregated();
+            let latency_ms = s.latencies.aggregated() / 1_000_000u64;
             let rps = s.rps(start.elapsed().as_secs());
             let mbps: u64 = s.mbps(start.elapsed().as_secs());
             println!(
                 "{}:{} - RPS: {}, Latency {} ms, MBps {}",
-                endpoint.addr, endpoint.port, rps, latency, mbps
+                endpoint.addr, endpoint.port, rps, latency_ms, mbps
             );
         }
     }
@@ -112,12 +115,17 @@ pub async fn main() -> anyhow::Result<()> {
 
     init_prometheus_server()?;
 
-    let ident = cgroup_path.display().to_string();
+    let extra_labels = [(
+        "hostname",
+        std::fs::read_to_string("/proc/sys/kernel/hostname")?,
+    )];
 
-    let kite = KiteEbpf::load(&cgroup_path, ident).await?;
+    let kite = KiteEbpf::load(&cgroup_path, &extra_labels).await?;
 
-    // Start the periodic task to print statistics
-    tokio::spawn(print_stats(kite.http_stats(), opt.stats_interval));
+    if opt.print_stats {
+        // Start the periodic task to print statistics
+        tokio::spawn(print_stats(kite.http_stats(), opt.stats_interval));
+    }
 
     // NOTE: the Ebpf object must be kept in scope for the program to run and stay attached.
 

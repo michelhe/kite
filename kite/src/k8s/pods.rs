@@ -8,7 +8,7 @@ use crate::cgroup2::find_cgroup2_mount;
 
 pub async fn get_pods(
     kube_client: kube::Client,
-    namespace: &Option<String>,
+    namespace: Option<&str>,
 ) -> anyhow::Result<ObjectList<Pod>> {
     let pods = if let Some(namespace) = namespace {
         kube::Api::namespaced(kube_client, namespace)
@@ -19,6 +19,30 @@ pub async fn get_pods(
     let pod_list = pods.list(&list_params).await?;
 
     Ok(pod_list)
+}
+
+pub async fn get_pod(
+    kube_client: kube::Client,
+    name: &str,
+    namespace: Option<&str>,
+) -> anyhow::Result<Pod> {
+    let pods = if let Some(namespace) = namespace {
+        kube::Api::namespaced(kube_client, namespace)
+    } else {
+        kube::Api::all(kube_client)
+    };
+    Ok(pods.get(name).await?)
+}
+
+/// Get the app name of a pod from its labels.
+/// We first try to get the "app" label, if it doesn't exist we try to get the "kite.io/app-name" label.
+/// If none of the labels exist, we return None.
+pub fn get_app_name(pod: &Pod) -> Option<String> {
+    let labels = pod.metadata.labels.as_ref()?;
+    labels
+        .get("app")
+        .or_else(|| labels.get("kite.io/app-name"))
+        .cloned()
 }
 
 /// This function is responsible for getting the current pod.
