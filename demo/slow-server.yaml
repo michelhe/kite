@@ -15,6 +15,9 @@ spec:
       - name: slow-server
         image: python:3.12
         command: ["python3", "/app/slow-server.py"]
+        env:
+          - name: MAX_SLEEP
+            value: "0.1"
         resources:
           limits:
             memory: "128Mi"
@@ -44,7 +47,7 @@ data:
     from http.server import SimpleHTTPRequestHandler, HTTPServer
 
     LISTEN_PORT = os.getenv('LISTEN_PORT', 1337)
-    MAX_SLEEP = os.getenv('MAX_SLEEP', 1)
+    MAX_SLEEP = float(os.getenv('MAX_SLEEP', 1.0))
 
     def slow():
         sleep_time = random.random() * MAX_SLEEP

@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 
 use kite_ebpf_types::Endpoint as LowLevelEndpoint;
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct Endpoint {
     pub addr: IpAddr,
     pub port: u16,

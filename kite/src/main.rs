@@ -1,13 +1,14 @@
 use std::time::Duration;
 
 use clap::Parser;
+use tokio::time::interval;
+use tracing::{info, Level};
+
 use kite::{
     ebpf::SharedEbpfManager,
     ipc::{get_kite_sock, ipc_server_task},
-    utils::{check_kernel_supported, try_remove_rlimit},
+    utils::{check_kernel_supported, init_prometheus_server, try_remove_rlimit},
 };
-use tokio::time::interval;
-use tracing::{info, Level};
 
 #[derive(Parser, Debug)]
 #[command(name = "kite")]
@@ -43,25 +44,35 @@ async fn print_stats(ebpf_manager: SharedEbpfManager) {
             let mut http_stats = http_stats.lock().await;
             let http_stats = std::mem::take(&mut *http_stats);
 
-            info!("[{}] --- Response stats ---", kite.ident);
+            info!("[{}] --- Response stats ---", kite.ident());
             for (endpoint, s) in http_stats.responses.iter() {
                 let rps = s.rps(start.elapsed().as_secs());
                 let mbps = s.mbps(start.elapsed().as_secs());
                 let latency = s.latencies.aggregated();
                 info!(
                     "[{}] Stats for {:?}:{} RPS: {}, Latency {} ms, MBps {}",
-                    kite.ident, endpoint.addr, endpoint.port, rps, latency, mbps
+                    kite.ident(),
+                    endpoint.addr,
+                    endpoint.port,
+                    rps,
+                    latency,
+                    mbps
                 );
             }
 
-            info!("[{}] --- Requests stats ---", kite.ident);
+            info!("[{}] --- Requests stats ---", kite.ident());
             for (endpoint, s) in http_stats.requests.iter() {
                 let rps = s.rps(start.elapsed().as_secs());
                 let mbps = s.mbps(start.elapsed().as_secs());
                 let latency = s.latencies.aggregated();
                 info!(
                     "[{}] Stats for {:?}:{} RPS: {}, Latency {} ms, MBps {}",
-                    kite.ident, endpoint.addr, endpoint.port, rps, latency, mbps
+                    kite.ident(),
+                    endpoint.addr,
+                    endpoint.port,
+                    rps,
+                    latency,
+                    mbps
                 );
             }
         }
@@ -86,6 +97,8 @@ async fn main() -> anyhow::Result<()> {
     try_remove_rlimit();
 
     check_kernel_supported()?;
+
+    init_prometheus_server()?;
 
     let kite_sock = get_kite_sock();
 

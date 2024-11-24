@@ -3,26 +3,30 @@
 //! See loader.rs for a simple example of how to use this module.
 use std::{
     collections::BTreeMap,
-    ops::Deref,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use anyhow::Context as _;
-pub use aya::Ebpf; // Re-export the Ebpf struct from the aya crate
+use aya::Ebpf;
 use aya::{
     maps::AsyncPerfEventArray,
     programs::{CgroupAttachMode, CgroupSkb, CgroupSkbAttachType, CgroupSock},
 };
-use kite_ebpf_types::HTTPEventKind;
 use log::{debug, info, warn};
+use metrics::{counter, histogram};
 use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::bytes::BytesMut;
 
 use crate::stats::{Endpoint, SharedHTTPStats};
-pub use kite_ebpf_types::{Endpoint as LowLevelEndpoint, HTTPRequestEvent};
+pub use kite_ebpf_types::{Endpoint as LowLevelEndpoint, HTTPEventKind, HTTPRequestEvent};
 
-async fn process_event(event: HTTPRequestEvent, stats: SharedHTTPStats) {
+async fn process_event(
+    event: HTTPRequestEvent,
+    stats: SharedHTTPStats,
+    ident: String,
+    cgroup_path: PathBuf,
+) {
     let dst = Endpoint::from(event.conn.dst);
     let mut stats = stats.lock().await;
     let map = match event.event_kind {
@@ -32,56 +36,46 @@ async fn process_event(event: HTTPRequestEvent, stats: SharedHTTPStats) {
     let entry = map.entry(dst).or_default();
     entry.request_count += 1;
     entry.total_bytes += event.total_bytes as u64;
-    entry.latencies.push(event.duration_ns / 1_000_000); // Convert ns to ms
-}
+    let duration_ms = event.duration_ns / 1_000_000;
+    entry.latencies.push(duration_ms); // Convert ns to ms
 
-async fn spawn_collectors(
-    ebpf: &mut Ebpf,
-    http_stats: SharedHTTPStats,
-) -> anyhow::Result<Vec<JoinHandle<()>>> {
-    let events_map = ebpf
-        .take_map("EVENTS")
-        .context("Failed to pin EVENTS map")?;
+    let base_metric_name = match event.event_kind {
+        HTTPEventKind::OutboundRequest => "kite.http.request.outbound",
+        HTTPEventKind::InboundRequest => "kite.http.request.inbound",
+    };
 
-    let mut perf_array = AsyncPerfEventArray::try_from(events_map)?;
+    let labels = vec![
+        ("endpoint", format!("{:?}", dst)),
+        ("app_id", ident),
+        ("cgroup_path", cgroup_path.to_string_lossy().to_string()),
+    ];
 
-    let mut tasks = Vec::new();
-    for cpu_id in aya::util::online_cpus().map_err(|(_, error)| error)? {
-        let mut buf = perf_array.open(cpu_id, None)?;
-
-        let http_stats = http_stats.clone();
-        let handle = tokio::task::spawn(async move {
-            let mut buffers = (0..10)
-                .map(|_| BytesMut::with_capacity(1024))
-                .collect::<Vec<_>>();
-
-            loop {
-                let events = buf.read_events(&mut buffers).await.unwrap();
-                for buf in buffers.iter_mut().take(events.read) {
-                    let ptr = buf.as_ptr() as *const HTTPRequestEvent;
-                    let data = unsafe { ptr.read_unaligned() };
-
-                    process_event(data, http_stats.clone()).await;
-                }
-            }
-        });
-
-        tasks.push(handle);
-    }
-    Ok(tasks)
+    histogram!(format!("{base_metric_name}.durtaion"), &labels).record(duration_ms as f64);
+    counter!(format!("{base_metric_name}.count"), &labels).increment(1);
+    histogram!(format!("{base_metric_name}.bytes"), &labels).record(event.total_bytes as f64);
 }
 
 /// Container struct to hold the cgroup eBPF programs and stats.
 pub struct KiteEbpf {
-    ebpf: Ebpf,
+    /// An opaque identifier for the eBPF programs. This does not need to be unique.
+    ident: String,
+
+    /// The path to the cgroup that the eBPF programs are attached to.
     cgroup_path: PathBuf,
+
+    /// The tokio tasks that collect the stats from the eBPF programs.
     collector_tasks: Vec<JoinHandle<()>>,
+
+    /// The shared stats object to store the stats from the eBPF programs.
     http_stats: SharedHTTPStats,
+
+    /// The owned eBPF object to keep the programs loaded and attached as long as this object is alive.
+    ebpf: aya::Ebpf,
 }
 
 impl KiteEbpf {
     /// Loads the ebpf programs into the kernel and attaching them to the cgroup_path.
-    pub async fn load(cgroup_path: &Path) -> anyhow::Result<KiteEbpf> {
+    pub async fn load(cgroup_path: &Path, ident: String) -> anyhow::Result<KiteEbpf> {
         info!("Loading program for cgroup path: {:?}", cgroup_path);
 
         let mut ebpf = Ebpf::load(aya::include_bytes_aligned!(concat!(
@@ -135,20 +129,56 @@ impl KiteEbpf {
 
         info!("Successfully loadded ebpf with programs {:?}", loaded_progs);
 
-        Ok(KiteEbpf::new(ebpf, cgroup_path.to_owned()).await)
+        KiteEbpf::new(ebpf, cgroup_path.to_owned(), ident).await
     }
 
-    async fn new(mut ebpf: Ebpf, cgroup_path: PathBuf) -> KiteEbpf {
+    async fn new(ebpf: aya::Ebpf, cgroup_path: PathBuf, ident: String) -> anyhow::Result<Self> {
         let http_stats = Arc::new(Mutex::new(Default::default()));
-        let collector_tasks = spawn_collectors(&mut ebpf, http_stats.clone())
-            .await
-            .expect("Failed to create event collectors");
-        KiteEbpf {
-            ebpf,
+        let mut ebpf = KiteEbpf {
+            ident,
             cgroup_path,
-            collector_tasks,
+            collector_tasks: Vec::new(),
             http_stats,
+            ebpf,
+        };
+        ebpf.spawn_collectors().await?;
+        Ok(ebpf)
+    }
+
+    async fn spawn_collectors(&mut self) -> anyhow::Result<()> {
+        let events_map = self
+            .ebpf
+            .take_map("EVENTS")
+            .context("Failed to pin EVENTS map")?;
+
+        let mut perf_array = AsyncPerfEventArray::try_from(events_map)?;
+
+        for cpu_id in aya::util::online_cpus().map_err(|(_, error)| error)? {
+            let mut buf = perf_array.open(cpu_id, None)?;
+
+            let ident = self.ident.clone();
+            let cgroup_path = self.cgroup_path.clone();
+            let http_stats = self.http_stats();
+            let handle = tokio::task::spawn(async move {
+                let mut buffers = (0..10)
+                    .map(|_| BytesMut::with_capacity(1024))
+                    .collect::<Vec<_>>();
+
+                loop {
+                    let events = buf.read_events(&mut buffers).await.unwrap();
+                    for buf in buffers.iter_mut().take(events.read) {
+                        let ptr = buf.as_ptr() as *const HTTPRequestEvent;
+                        let data = unsafe { ptr.read_unaligned() };
+
+                        process_event(data, http_stats.clone(), ident.clone(), cgroup_path.clone())
+                            .await;
+                    }
+                }
+            });
+
+            self.collector_tasks.push(handle);
         }
+        Ok(())
     }
 
     pub fn cgroup_path(&self) -> &Path {
@@ -166,6 +196,10 @@ impl KiteEbpf {
     pub fn http_stats(&self) -> SharedHTTPStats {
         self.http_stats.clone()
     }
+
+    pub fn ident(&self) -> &str {
+        &self.ident
+    }
 }
 
 impl Drop for KiteEbpf {
@@ -178,24 +212,11 @@ impl Drop for KiteEbpf {
     }
 }
 
-pub struct ManagedEbpf {
-    ebpf: KiteEbpf,
-    pub ident: String,
-}
-
-impl Deref for ManagedEbpf {
-    type Target = KiteEbpf;
-
-    fn deref(&self) -> &Self::Target {
-        &self.ebpf
-    }
-}
-
 /// Convenience struct to manage multiple eBPF programs and their stats.
 #[derive(Default)]
 pub struct EbpfManager {
     /// cgroup -> ebpf,
-    pub ebpfs: BTreeMap<PathBuf, ManagedEbpf>,
+    pub ebpfs: BTreeMap<PathBuf, KiteEbpf>,
 }
 
 pub type SharedEbpfManager = Arc<Mutex<EbpfManager>>;
@@ -225,10 +246,9 @@ impl EbpfManager {
             return Err(anyhow::anyhow!(msg));
         }
 
-        let ebpf = KiteEbpf::load(cgroup_path).await?;
+        let ebpf = KiteEbpf::load(cgroup_path, ident).await?;
 
-        self.ebpfs
-            .insert(cgroup_path.to_owned(), ManagedEbpf { ebpf, ident });
+        self.ebpfs.insert(cgroup_path.to_owned(), ebpf);
 
         Ok(())
     }

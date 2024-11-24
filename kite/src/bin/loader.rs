@@ -10,7 +10,7 @@ use kite::{
     cgroup2,
     ebpf::KiteEbpf,
     stats::SharedHTTPStats,
-    utils::{check_kernel_supported, try_remove_rlimit},
+    utils::{check_kernel_supported, init_prometheus_server, try_remove_rlimit},
 };
 use log::{info, Record};
 use tokio::time::interval;
@@ -110,7 +110,11 @@ pub async fn main() -> anyhow::Result<()> {
 
     try_remove_rlimit();
 
-    let kite = KiteEbpf::load(&cgroup_path).await?;
+    init_prometheus_server()?;
+
+    let ident = cgroup_path.display().to_string();
+
+    let kite = KiteEbpf::load(&cgroup_path, ident).await?;
 
     // Start the periodic task to print statistics
     tokio::spawn(print_stats(kite.http_stats(), opt.stats_interval));

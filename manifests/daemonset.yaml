@@ -40,6 +40,9 @@ spec:
       app: kite-agent
   template:
     metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9000"
       labels:
         app: kite-agent
         kite.io/no-patch: "1"  # This pod should not be mutated
@@ -71,6 +74,8 @@ spec:
             limits:
               cpu: 200m
               memory: 500Mi
+          ports:
+            - containerPort: 9000
           env:
             - name: RUST_BACKTRACE
               value: "full"

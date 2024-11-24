@@ -1,5 +1,10 @@
+use std::time::Duration;
+
+use anyhow::Context as _;
 use aya::util::KernelVersion;
 use log::debug;
+use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics_util::MetricKindMask;
 
 /// We use eBPF features that are only available in newer kernels. Check if the kernel is supported.
 pub fn check_kernel_supported() -> anyhow::Result<()> {
@@ -24,4 +29,15 @@ pub fn try_remove_rlimit() {
     if ret != 0 {
         debug!("remove limit on locked memory failed, ret is: {}", ret);
     }
+}
+
+pub fn init_prometheus_server() -> anyhow::Result<()> {
+    PrometheusBuilder::new()
+        .idle_timeout(
+            MetricKindMask::COUNTER | MetricKindMask::HISTOGRAM,
+            Some(Duration::from_secs(10)),
+        )
+        .install()
+        .context("Failed to install prometheus server")?;
+    Ok(())
 }
