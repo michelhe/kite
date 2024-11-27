@@ -42,8 +42,10 @@ async fn print_stats(stats: SharedHTTPStats, stats_interval: u64) {
         let start = tokio::time::Instant::now();
         interval.tick().await;
 
-        let mut stats = stats.lock().await;
-        let stats_copy = std::mem::take(&mut *stats);
+        let stats_copy = {
+            let mut guard = stats.lock().await;
+            std::mem::take(&mut *guard)
+        };
 
         println!("--- Response stats ---");
         for (endpoint, s) in stats_copy.responses.iter() {
