@@ -29,7 +29,7 @@ struct ParsedTcp {
     data_size: usize,
 }
 
-#[repr(C)]
+#[repr(C, packed)]
 struct HTTPConnectionData {
     conn: Connection,
     kind: HTTPEventKind,
@@ -107,6 +107,7 @@ fn detect_http(ctx: &SkBuffContext, tcp: &ParsedTcp) -> Result<Option<HTTPDetect
 }
 
 /// A helper function to track the connection of an HTTP request in the ebpf map.
+#[inline]
 fn begin_tracking_http_request(
     conn: Connection,
     cookie: u64,
@@ -127,6 +128,7 @@ fn begin_tracking_http_request(
     Ok(0)
 }
 
+#[inline]
 fn finish_tracking_http_request(
     ctx: &SkBuffContext,
     cookie: u64,

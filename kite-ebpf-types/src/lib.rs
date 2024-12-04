@@ -1,6 +1,6 @@
 #![no_std]
 
-#[repr(C)]
+#[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 /// A convenience type for representing an Address:Port pair.
 pub struct Endpoint {
@@ -14,7 +14,7 @@ impl Endpoint {
     }
 }
 
-#[repr(C)]
+#[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// A convenience type for representing a connection between two endpoints.
 pub struct Connection {
@@ -49,7 +49,7 @@ pub enum HTTPEventKind {
 }
 
 /// An event representing a measurment of a single HTTP request.
-#[repr(C)]
+#[repr(C, packed)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HTTPRequestEvent {
     pub event_kind: HTTPEventKind,
