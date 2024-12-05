@@ -44,9 +44,7 @@ async fn print_stats(ebpf_manager: SharedEbpfManager) {
             let mut http_stats = http_stats.lock().await;
             let http_stats = std::mem::take(&mut *http_stats);
 
-            let extra_labels = kite.copy_lables();
-
-            info!("[{:?}] --- Response stats ---", extra_labels);
+            info!("--- Response stats ---");
             for (endpoint, s) in http_stats.responses.iter() {
                 let rps = s.rps(start.elapsed().as_secs());
                 let mbps = s.mbps(start.elapsed().as_secs());
@@ -57,7 +55,7 @@ async fn print_stats(ebpf_manager: SharedEbpfManager) {
                 );
             }
 
-            info!("[{:?}] --- Requests stats ---", extra_labels);
+            info!("--- Requests stats ---");
             for (endpoint, s) in http_stats.requests.iter() {
                 let rps = s.rps(start.elapsed().as_secs());
                 let mbps = s.mbps(start.elapsed().as_secs());

@@ -27,15 +27,6 @@ impl Connection {
         Self { src, dst }
     }
 
-    /// Returns a hash of the connection key. Note that we assume that the dest address is unique per port and always either 127.0.0.1 or 0.0.0.0.
-    // pub fn hash(&self) -> u64 {
-    //     let mut hash: u64 = 0;
-    //     hash |= (self.src.addr as u64) << 32;
-    //     hash |= (self.src.port as u64) << 16;
-    //     hash |= self.dst.port as u64;
-    //     hash
-    // }
-
     pub fn filter_port(&self, port: u16) -> bool {
         self.src.port == port || self.dst.port == port
     }
@@ -48,17 +39,57 @@ pub enum HTTPEventKind {
     InboundRequest,
 }
 
+const MTU: usize = 1500;
+
+/// Wrapper around a packet data buffer.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PacketData {
+    pub buf: [u8; MTU],
+    pub len: usize,
+}
+
+impl Default for PacketData {
+    fn default() -> Self {
+        Self {
+            buf: [0; MTU],
+            len: 0,
+        }
+    }
+}
+
+#[cfg(feature = "user")]
+impl PacketData {
+    #[inline(always)]
+    pub fn as_slice(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
 /// An event representing a measurment of a single HTTP request.
-#[repr(C, packed)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct HTTPRequestEvent {
+    /// Unique identifier for the socket connection.
+    pub cookie: u64,
+    /// The kind of event.
     pub event_kind: HTTPEventKind,
+    /// The connection that the request was sent on.
     pub conn: Connection,
+    /// Duration (in nanoseconds) of the time it took to receive the response headers.
+    /// The duration does not include the time it takes to read the response body.
     pub duration_ns: u64,
     /// TODO: This a slight lie for now, as we we are not actually measuring the data sent in the response body.
     pub total_bytes: usize,
-    // TODO: bytes sent/received, CPU time, etc.
+
+    // /// The request data.
+    pub request: PacketData,
+    /// The response data.
+    pub response: PacketData,
 }
+
+unsafe impl Send for HTTPRequestEvent {}
+unsafe impl Sync for HTTPRequestEvent {}
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for Endpoint {}
@@ -67,4 +98,7 @@ unsafe impl aya::Pod for Endpoint {}
 unsafe impl aya::Pod for Connection {}
 
 #[cfg(feature = "user")]
-unsafe impl aya::Pod for RequestEvent {}
+unsafe impl aya::Pod for HTTPRequestEvent {}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for PacketData {}

@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-kite-ebpf-types = { path = "../kite-ebpf-types" }
+kite-ebpf-types = { path = "../kite-ebpf-types", features = ["user"]}
 
-aya = { workspace = true }
+aya = { workspace = true, features=["async_tokio"] }
 aya-log = { workspace = true }
 
 anyhow = { workspace = true, default-features = true }
@@ -31,6 +31,8 @@ metrics = "0.24.0"
 metrics-exporter-prometheus = { version = "0.16.0", features = ["http-listener"] }
 metrics-util = "0.18.0"
 rustls = "0.23.18"
+lazy_static = "1.5.0"
+httparse = "1.9.5"
 
 [build-dependencies]
 cargo_metadata = { workspace = true }

@@ -9,6 +9,7 @@ use anyhow::Context as _;
 static mut CACHED_CGROUP2_MOUNT: Option<StdMutex<PathBuf>> = None;
 static INIT: Once = Once::new();
 
+#[allow(static_mut_refs)] // Safe because we only write to it once
 pub fn find_cgroup2_mount() -> PathBuf {
     INIT.call_once(|| {
         let mounts: String = std::fs::read_to_string("/proc/1/mounts")

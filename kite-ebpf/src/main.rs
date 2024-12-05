@@ -2,140 +2,128 @@
 #![no_main]
 
 use aya_ebpf::{
-    bindings::BPF_F_NO_PREALLOC,
+    bindings::{sk_action::SK_PASS, BPF_F_NO_PREALLOC},
+    cty::c_long,
     helpers::{bpf_get_socket_cookie, bpf_ktime_get_ns},
     macros::{cgroup_skb, cgroup_sock, map},
-    maps::{HashMap, PerfEventArray},
+    maps::{HashMap, PerCpuArray, PerfEventArray},
     programs::{SkBuffContext, SockContext},
     EbpfContext,
 };
-use aya_log_ebpf::{debug, error, warn};
-use kite_ebpf_types::{Connection, Endpoint, HTTPEventKind, HTTPRequestEvent};
+use aya_log_ebpf::{debug, error, info, warn};
+use kite_ebpf_types::{Connection, Endpoint, HTTPEventKind, HTTPRequestEvent, PacketData};
 
 mod bindings;
-use bindings::{iphdr, tcphdr};
-
-const ETH_P_IP: u32 = 8;
-#[allow(unused)]
-const ETH_P_IPV6: u32 = 0x86DD; // TODO: Support IPv6
-const IPPROTO_TCP: u8 = 6;
-
-const SK_PASS: i32 = 1;
-
-struct ParsedTcp {
-    ip: iphdr,
-    tcp: tcphdr,
-    data_offset: usize,
-    data_size: usize,
-}
+mod tcp;
+use tcp::{parse_tcp, ParsedTcp};
+mod http;
+use http::{detect_http, HTTPDetection};
 
 #[repr(C, packed)]
-struct HTTPConnectionData {
+struct HTTPConnectionState {
     conn: Connection,
     kind: HTTPEventKind,
     request_count: usize,
     total_time_ns: u64,
-    bytes_out: usize,
-    bytes_in: usize,
+    total_bytes: usize,
     last_request_time_ns: u64,
 }
 
 const MAX_CONNECTIONS: u32 = 10000;
 
 #[map]
-static KITE_CONTRACK: HashMap<u64, HTTPConnectionData> =
+static KITE_CONTRACK: HashMap<u64, HTTPConnectionState> =
     HashMap::with_max_entries(MAX_CONNECTIONS, BPF_F_NO_PREALLOC);
 
 #[map]
 static EVENTS: PerfEventArray<HTTPRequestEvent> = PerfEventArray::new(0);
 
-fn parse_tcp(ctx: &SkBuffContext) -> Result<Option<ParsedTcp>, i64> {
-    let protocol = unsafe { (*ctx.skb.skb).protocol };
+#[map]
+static REQUEST_PACKETS: HashMap<u64, PacketData> = HashMap::with_max_entries(MAX_CONNECTIONS, 0);
 
-    // TODO: Support IPv6
-    if protocol != ETH_P_IP {
-        return Ok(None);
-    }
+/// A buffer to store temp TCP data.
+#[map]
+static mut SCRATCH_PACKET: PerCpuArray<PacketData> = PerCpuArray::with_max_entries(1, 0);
 
-    let ip = ctx.load::<iphdr>(0)?;
-
-    if ip.protocol != IPPROTO_TCP {
-        return Ok(None);
-    }
-
-    let ip_hlen: usize = u8::from_be(ip.ihl()) as usize * 4;
-    let tcp = ctx.load::<tcphdr>(ip_hlen)?;
-
-    let tcp_hlen = tcp.doff() as usize * 4;
-
-    Ok(Some(ParsedTcp {
-        ip,
-        tcp,
-        data_offset: ip_hlen + tcp_hlen,
-        data_size: ctx.len() as usize - ip_hlen - tcp_hlen,
-    }))
+#[inline]
+#[allow(static_mut_refs)]
+fn get_scratch_packet() -> Result<&'static mut PacketData, c_long> {
+    let event = unsafe {
+        let ptr = SCRATCH_PACKET.get_ptr_mut(0).ok_or(SK_PASS)?;
+        &mut *ptr
+    };
+    Ok(event)
 }
-
-#[derive(Clone, Copy)]
-enum HTTPDetection {
-    Request,
-    Response,
-}
-
-fn detect_http(ctx: &SkBuffContext, tcp: &ParsedTcp) -> Result<Option<HTTPDetection>, i64> {
-    if tcp.data_size < 8 {
-        return Ok(None);
-    }
-
-    let data = ctx.load::<[u8; 8]>(tcp.data_offset)?;
-
-    match (
-        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-    ) {
-        (b'G', b'E', b'T', b' ', _, _, _, _) => Ok(Some(HTTPDetection::Request)),
-        (b'P', b'O', b'S', b'T', _, _, _, _) => Ok(Some(HTTPDetection::Request)),
-        (b'P', b'U', b'T', b' ', _, _, _, _) => Ok(Some(HTTPDetection::Request)),
-        (b'D', b'E', b'L', b'E', b'T', b'E', _, _) => Ok(Some(HTTPDetection::Request)),
-        (b'H', b'E', b'A', b'D', _, _, _, _) => Ok(Some(HTTPDetection::Request)),
-        (b'O', b'P', b'T', b'I', b'O', b'N', b'S', _) => Ok(Some(HTTPDetection::Request)),
-        (b'C', b'O', b'N', b'N', b'E', b'C', b'T', _) => Ok(Some(HTTPDetection::Request)),
-        (b'T', b'R', b'A', b'C', b'E', _, _, _) => Ok(Some(HTTPDetection::Request)),
-        (b'P', b'A', b'T', b'C', b'H', _, _, _) => Ok(Some(HTTPDetection::Request)),
-        (b'H', b'T', b'T', b'P', b'/', _, _, _) => Ok(Some(HTTPDetection::Response)),
-        _ => Ok(None),
-    }
-}
-
 /// A helper function to track the connection of an HTTP request in the ebpf map.
 #[inline]
 fn begin_tracking_http_request(
+    ctx: &SkBuffContext,
+    tcp: &ParsedTcp,
     conn: Connection,
     cookie: u64,
-    bytes_out: usize,
-    bytes_in: usize,
     kind: HTTPEventKind,
 ) -> Result<i32, i64> {
-    let data = HTTPConnectionData {
+    let data = HTTPConnectionState {
         conn,
         kind,
         request_count: 1,
         total_time_ns: 0,
-        bytes_out,
-        bytes_in,
+        total_bytes: tcp.data_size,
         last_request_time_ns: unsafe { bpf_ktime_get_ns() },
     };
     KITE_CONTRACK.insert(&cookie, &data, BPF_F_NO_PREALLOC as u64)?;
+
+    let pd = get_scratch_packet()?;
+    read_packet(ctx, pd, tcp.data_offset as u32)?;
+
+    REQUEST_PACKETS.insert(&cookie, &pd, BPF_F_NO_PREALLOC as u64)?;
     Ok(0)
 }
 
+#[map]
+static mut SCRATCH_EVENT: PerCpuArray<HTTPRequestEvent> = PerCpuArray::with_max_entries(1, 0);
+
 #[inline]
+#[allow(static_mut_refs)]
+fn get_scratch_event() -> Result<&'static mut HTTPRequestEvent, c_long> {
+    let event = unsafe {
+        let ptr = SCRATCH_EVENT.get_ptr_mut(0).ok_or(SK_PASS)?;
+        &mut *ptr
+    };
+    Ok(event)
+}
+
+/// Read the response packet from the context. A helper function with necessary bound checks to make the verifier happy.
+#[inline(always)]
+fn read_packet(ctx: &SkBuffContext, pd: &mut PacketData, offset: u32) -> Result<(), c_long> {
+    let packet_len = ctx.len() as usize;
+    let buf_len = pd.buf.len();
+
+    if offset as usize >= packet_len {
+        return Err(-1);
+    }
+
+    let read_len = core::cmp::min(buf_len, packet_len - offset as usize);
+
+    if read_len == 0 || read_len > buf_len {
+        return Err(-1);
+    }
+
+    ctx.load_bytes(offset as usize, &mut pd.buf[0..read_len])?;
+    pd.len = read_len as usize;
+    Ok(())
+}
+
+/// Called from within HTTP response packet context to finish tracking the HTTP request.
+#[inline(always)]
 fn finish_tracking_http_request(
     ctx: &SkBuffContext,
+    tcp: &ParsedTcp,
     cookie: u64,
-    data: &HTTPConnectionData,
+    state: &mut HTTPConnectionState,
     conn: Connection,
 ) -> Result<i32, i64> {
-    let start_time_ns = data.last_request_time_ns;
+    let start_time_ns = state.last_request_time_ns;
     let end_time_ns = unsafe { bpf_ktime_get_ns() };
     let duration_ns = if end_time_ns < start_time_ns {
         warn!(
@@ -151,7 +139,7 @@ fn finish_tracking_http_request(
         end_time_ns - start_time_ns
     };
 
-    let event_kind = data.kind;
+    let event_kind = state.kind;
     let prefix = match event_kind {
         HTTPEventKind::InboundRequest => "Inbound",
         HTTPEventKind::OutboundRequest => "Outbound",
@@ -166,33 +154,42 @@ fn finish_tracking_http_request(
         conn.dst.addr,
         conn.dst.port,
         duration_ns / 1_000_000,
-        data.bytes_out + data.bytes_in,
+        state.total_bytes,
     );
 
-    // TODO we need to account for the response size as well, for that we need to track the socket till the response is sent.
-    let event = HTTPRequestEvent {
-        event_kind: data.kind,
-        total_bytes: data.bytes_out + data.bytes_in, // TODO: Split to bytes_out and bytes_in
-        conn,
-        duration_ns,
-    };
+    // Submit the event to userspace
+    // Populate the event
+    let event = get_scratch_event()?;
+    event.cookie = cookie;
+    event.event_kind = event_kind;
+    event.total_bytes = state.total_bytes;
+    event.conn = conn;
+    event.duration_ns = duration_ns;
+    // Copy state.request into event.request
+    event.request = unsafe { *REQUEST_PACKETS.get(&cookie).ok_or(SK_PASS)? };
+
+    let pd = get_scratch_packet()?;
+    read_packet(ctx, pd, tcp.data_offset as u32)?;
+    event.response = *pd;
+
     EVENTS.output(ctx, &event, 0);
-    KITE_CONTRACK.remove(&cookie)?; // Remove to avoid memory leak.
+    // KITE_CONTRACK.remove(&cookie)?; // Remove to avoid memory leak.
     Ok(0)
 }
 
 #[cgroup_skb]
 pub fn kite_ingress(ctx: SkBuffContext) -> i32 {
     match ingress_main(&ctx) {
-        Ok(res) => res,
+        Ok(res) => res as i32,
         Err(err) => {
             error!(&ctx, "Error: {}", err);
-            SK_PASS
+            SK_PASS as i32
         }
     }
 }
 
-fn ingress_main(ctx: &SkBuffContext) -> Result<i32, i64> {
+#[inline(always)]
+fn ingress_main(ctx: &SkBuffContext) -> Result<u32, c_long> {
     let maybe_tcp = parse_tcp(&ctx)?;
     if maybe_tcp.is_none() {
         return Ok(SK_PASS);
@@ -234,15 +231,13 @@ fn ingress_main(ctx: &SkBuffContext) -> Result<i32, i64> {
             };
 
             // Begin tracking this connection.
-            begin_tracking_http_request(conn, cookie, 0, tcp.data_size, kind)?;
+            begin_tracking_http_request(ctx, &tcp, conn, cookie, kind)?;
         }
-        Some(data) => {
+        Some(state) => {
             // We have seen this connection before.
 
-            // Account for the size of the packet.
-            unsafe {
-                (*data).bytes_in += tcp.data_size;
-            }
+            let state = unsafe { &mut *state };
+            state.total_bytes += tcp.data_size;
 
             match http_detection {
                 None => {
@@ -261,8 +256,7 @@ fn ingress_main(ctx: &SkBuffContext) -> Result<i32, i64> {
                     return Ok(SK_PASS);
                 }
                 Some(HTTPDetection::Response) => {
-                    // This skb is a response to a request we've seen before.
-                    finish_tracking_http_request(ctx, cookie, unsafe { &*data }, conn)?;
+                    finish_tracking_http_request(ctx, &tcp, cookie, state, conn)?;
                 }
             }
         }
@@ -274,15 +268,15 @@ fn ingress_main(ctx: &SkBuffContext) -> Result<i32, i64> {
 #[cgroup_skb]
 pub fn kite_egress(ctx: SkBuffContext) -> i32 {
     match egress_main(&ctx) {
-        Ok(res) => res,
+        Ok(res) => res as i32,
         Err(err) => {
             error!(&ctx, "Error: {}", err);
-            SK_PASS
+            SK_PASS as i32
         }
     }
 }
 
-fn egress_main(ctx: &SkBuffContext) -> Result<i32, i64> {
+fn egress_main(ctx: &SkBuffContext) -> Result<u32, i64> {
     let maybe_tcp = parse_tcp(&ctx)?;
     if maybe_tcp.is_none() {
         return Ok(SK_PASS);
@@ -301,7 +295,6 @@ fn egress_main(ctx: &SkBuffContext) -> Result<i32, i64> {
     match KITE_CONTRACK.get_ptr_mut(&cookie) {
         None => {
             // We haven't seen this connection before.
-
             if http_detection.is_none() {
                 return Ok(SK_PASS);
             }
@@ -324,15 +317,15 @@ fn egress_main(ctx: &SkBuffContext) -> Result<i32, i64> {
             };
 
             // Begin tracking this connection.
-            begin_tracking_http_request(conn, cookie, tcp.data_size, 0, kind)?;
+            begin_tracking_http_request(ctx, &tcp, conn, cookie, kind)?;
         }
-        Some(data) => {
+        Some(state) => {
+            info!(ctx, "We have seen this connection before");
             // We have seen this connection before.
+            let state = unsafe { &mut *state };
 
             // Account for the size of the packet.
-            unsafe {
-                (*data).bytes_out += tcp.data_size;
-            }
+            state.total_bytes += tcp.data_size;
 
             match http_detection {
                 None => {
@@ -352,7 +345,15 @@ fn egress_main(ctx: &SkBuffContext) -> Result<i32, i64> {
                 }
                 Some(HTTPDetection::Response) => {
                     // This skb is a response to a request we've seen before.
-                    finish_tracking_http_request(ctx, cookie, unsafe { &*data }, conn)?;
+                    info!(
+                        ctx,
+                        "Response on {:i}:{} -> {:i}:{}",
+                        conn.src.addr,
+                        conn.src.port,
+                        conn.dst.addr,
+                        conn.dst.port,
+                    );
+                    finish_tracking_http_request(ctx, &tcp, cookie, state, conn)?;
                 }
             }
         }
@@ -361,8 +362,6 @@ fn egress_main(ctx: &SkBuffContext) -> Result<i32, i64> {
     Ok(SK_PASS)
 }
 
-const SOCK_PASS: i32 = 1;
-
 #[cgroup_sock(sock_release)]
 /// This program is called when a socket is released. We use it to clean up the connection tracking.
 pub fn kite_sock_release(ctx: SockContext) -> i32 {
@@ -370,7 +369,7 @@ pub fn kite_sock_release(ctx: SockContext) -> i32 {
         Ok(res) => res,
         Err(err) => {
             error!(&ctx, "Error: {}", err);
-            SOCK_PASS
+            1
         }
     }
 }
@@ -379,7 +378,7 @@ fn try_sock_release(ctx: &SockContext) -> Result<i32, i64> {
     let cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr()) };
     let maybe_data = unsafe { KITE_CONTRACK.get(&cookie) };
     if maybe_data.is_none() {
-        return Ok(SOCK_PASS);
+        return Ok(1);
     } else {
         let data = maybe_data.unwrap();
         debug!(
@@ -392,7 +391,7 @@ fn try_sock_release(ctx: &SockContext) -> Result<i32, i64> {
         );
         KITE_CONTRACK.remove(&cookie)?;
     }
-    Ok(SOCK_PASS)
+    Ok(1)
 }
 
 #[cfg(not(test))]

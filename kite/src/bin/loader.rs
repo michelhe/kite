@@ -1,7 +1,6 @@
 use std::{
     io::Write,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use clap::Parser;
@@ -9,11 +8,9 @@ use env_logger::fmt::Formatter;
 use kite::{
     cgroup2,
     ebpf::KiteEbpf,
-    stats::SharedHTTPStats,
     utils::{check_kernel_supported, init_prometheus_server, try_remove_rlimit},
 };
 use log::{info, Record};
-use tokio::time::interval;
 
 #[derive(Parser)]
 /// A simple standalone version of kite. The will load the eBPF program and print statistics.
@@ -23,52 +20,9 @@ struct Opt {
     #[arg(short, long, required = false, default_value = "root")]
     cgroup_path: String,
 
-    #[arg(short, long, default_value = "10")]
-    /// The interval at which to collect statistics, in seconds.
-    stats_interval: u64,
-
     #[arg(long, action = clap::ArgAction::SetTrue, required = false)]
     /// Set if you want to see the spammy logs of the eBPF program ELF relocation.
     enable_aya_obj_logs: bool,
-
-    #[arg(long, action = clap::ArgAction::SetTrue, required = false)]
-    print_stats: bool,
-}
-
-async fn print_stats(stats: SharedHTTPStats, stats_interval: u64) {
-    let mut interval = interval(Duration::from_secs(stats_interval));
-    interval.tick().await; // Skip the first tick as it is always 0
-    loop {
-        let start = tokio::time::Instant::now();
-        interval.tick().await;
-
-        let stats_copy = {
-            let mut guard = stats.lock().await;
-            std::mem::take(&mut *guard)
-        };
-
-        println!("--- Response stats ---");
-        for (endpoint, s) in stats_copy.responses.iter() {
-            let latency_ms = s.latencies.aggregated() / 1_000_000u64;
-            let rps = s.rps(start.elapsed().as_secs());
-            let mbps: u64 = s.mbps(start.elapsed().as_secs());
-            println!(
-                "{}:{} - RPS: {}, Latency {} ms, MBps {}",
-                endpoint.addr, endpoint.port, rps, latency_ms, mbps
-            );
-        }
-
-        println!("--- Request stats ---");
-        for (endpoint, s) in stats_copy.requests.iter() {
-            let latency_ms = s.latencies.aggregated() / 1_000_000u64;
-            let rps = s.rps(start.elapsed().as_secs());
-            let mbps: u64 = s.mbps(start.elapsed().as_secs());
-            println!(
-                "{}:{} - RPS: {}, Latency {} ms, MBps {}",
-                endpoint.addr, endpoint.port, rps, latency_ms, mbps
-            );
-        }
-    }
 }
 
 fn init_logger(opt: &Opt, cgroup_path: &Path) -> anyhow::Result<()> {
@@ -122,12 +76,9 @@ pub async fn main() -> anyhow::Result<()> {
         std::fs::read_to_string("/proc/sys/kernel/hostname")?,
     )];
 
-    let kite = KiteEbpf::load(&cgroup_path, &extra_labels).await?;
+    let _kite = KiteEbpf::load(&cgroup_path, &extra_labels).await?;
 
-    if opt.print_stats {
-        // Start the periodic task to print statistics
-        tokio::spawn(print_stats(kite.http_stats(), opt.stats_interval));
-    }
+    info!("Prometheus exporter started at http://localhost:9000/metrics");
 
     // NOTE: the Ebpf object must be kept in scope for the program to run and stay attached.
 

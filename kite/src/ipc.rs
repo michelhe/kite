@@ -26,6 +26,7 @@ static mut CACHED_PATH: Option<Mutex<PathBuf>> = None;
 
 /// Get the path to the kite socket
 /// The path is read from the KITE_SOCK environment variable, or defaults to "/var/run/kite/kite.sock"
+#[allow(static_mut_refs)] // Safe because we only write to it once
 pub fn get_kite_sock() -> PathBuf {
     unsafe {
         INIT.call_once(|| {

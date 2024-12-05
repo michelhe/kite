@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-kite-ebpf-types = { path = "../kite-ebpf-types" }
+kite-ebpf-types = { path = "../kite-ebpf-types"}
 aya-ebpf = { workspace = true }
 aya-log-ebpf = { workspace = true }
 memoffset = "0.8"

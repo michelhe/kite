@@ -18,6 +18,12 @@ pub struct Endpoint {
     pub port: u16,
 }
 
+impl fmt::Display for Endpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.addr, self.port)
+    }
+}
+
 impl From<LowLevelEndpoint> for Endpoint {
     fn from(endpoint: LowLevelEndpoint) -> Self {
         Self {
