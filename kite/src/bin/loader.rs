@@ -8,7 +8,8 @@ use env_logger::fmt::Formatter;
 use kite::{
     cgroup2,
     ebpf::KiteEbpf,
-    utils::{check_kernel_supported, init_prometheus_server, try_remove_rlimit},
+    metrics::init_prometheus_server,
+    utils::{check_kernel_supported, try_remove_rlimit},
 };
 use log::{info, Record};
 

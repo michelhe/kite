@@ -7,7 +7,8 @@ use tracing::{info, Level};
 use kite::{
     ebpf::SharedEbpfManager,
     ipc::{get_kite_sock, ipc_server_task},
-    utils::{check_kernel_supported, init_prometheus_server, try_remove_rlimit},
+    metrics::init_prometheus_server,
+    utils::{check_kernel_supported, try_remove_rlimit},
 };
 
 #[derive(Parser, Debug)]
