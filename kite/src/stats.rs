@@ -1,37 +1,9 @@
-use std::{
-    collections::HashMap,
-    fmt,
-    iter::Sum,
-    net::{IpAddr, Ipv4Addr},
-    ops,
-    sync::Arc,
-};
+use std::{collections::HashMap, fmt, iter::Sum, ops, sync::Arc};
 
 use num_traits::PrimInt;
 use tokio::sync::Mutex;
 
-use kite_ebpf_types::Endpoint as LowLevelEndpoint;
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
-pub struct Endpoint {
-    pub addr: IpAddr,
-    pub port: u16,
-}
-
-impl fmt::Display for Endpoint {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.addr, self.port)
-    }
-}
-
-impl From<LowLevelEndpoint> for Endpoint {
-    fn from(endpoint: LowLevelEndpoint) -> Self {
-        Self {
-            addr: IpAddr::V4(Ipv4Addr::from(endpoint.addr)),
-            port: endpoint.port,
-        }
-    }
-}
+use kite_ebpf_types::Endpoint;
 
 #[derive(Debug, Default, Clone)]
 pub struct Latencies(Vec<u64>);

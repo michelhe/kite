@@ -9,16 +9,12 @@ use std::{
 
 use anyhow::Context as _;
 use httparse::EMPTY_HEADER;
-use kite_ebpf_types::{HTTPEventKind, HTTPRequestEvent, PacketData};
+use kite_ebpf_types::{Endpoint, HTTPEventKind, HTTPRequestEvent, PacketData};
 use metrics::{counter, histogram, IntoLabels as _, Label};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use metrics_util::MetricKindMask;
 
-use crate::{
-    http,
-    stats::{Endpoint, SharedHTTPStats},
-    utils::is_global_ip,
-};
+use crate::{http, stats::SharedHTTPStats, utils::is_global_ip};
 
 async fn record_internal(key: Endpoint, event: &HTTPRequestEvent, stats: SharedHTTPStats) {
     let mut stats = stats.lock().await;
@@ -130,12 +126,8 @@ pub(crate) async fn process_cgroup_http_event(
     mut labels: Vec<Label>,
 ) -> anyhow::Result<()> {
     let (key, base_metric_name) = match event.event_kind {
-        HTTPEventKind::OutboundRequest => {
-            (Endpoint::from(event.conn.src), "kite.http.request.outbound")
-        }
-        HTTPEventKind::InboundRequest => {
-            (Endpoint::from(event.conn.dst), "kite.http.request.inbound")
-        }
+        HTTPEventKind::OutboundRequest => (event.conn.src, "kite.http.request.outbound"),
+        HTTPEventKind::InboundRequest => (event.conn.dst, "kite.http.request.inbound"),
     };
 
     add_labels_from_http(&event.request, &event.response, &mut labels)?;

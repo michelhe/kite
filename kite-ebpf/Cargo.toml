@@ -8,6 +8,7 @@ kite-ebpf-types = { path = "../kite-ebpf-types", default-features = false, featu
 aya-ebpf = { workspace = true }
 aya-log-ebpf = { workspace = true }
 memoffset = "0.8"
+network-types = "0.0.7"
 
 [build-dependencies]
 which = { workspace = true }

@@ -1,16 +1,32 @@
 #![no_std]
 
-#[repr(C, packed)]
+use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 /// A convenience type for representing an Address:Port pair.
 pub struct Endpoint {
-    pub addr: u32,
+    pub addr: core::net::IpAddr,
     pub port: u16,
 }
 
 impl Endpoint {
-    pub fn new(addr: u32, port: u16) -> Self {
+    pub fn new(addr: IpAddr, port: u16) -> Self {
         Self { addr, port }
+    }
+    pub fn new_v4(addr: Ipv4Addr, port: u16) -> Self {
+        Self::new(IpAddr::V4(addr), port)
+    }
+
+    pub fn new_v6(addr: Ipv6Addr, port: u16) -> Self {
+        Self::new(IpAddr::V6(addr), port)
+    }
+}
+
+#[cfg(feature = "user")]
+impl core::fmt::Display for Endpoint {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}:{}", self.addr, self.port)
     }
 }
 
