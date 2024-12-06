@@ -10,7 +10,7 @@ use aya_ebpf::{
     programs::{SkBuffContext, SockContext},
     EbpfContext,
 };
-use aya_log_ebpf::{debug, error, info, warn};
+use aya_log_ebpf::{debug, error, info, trace, warn};
 use kite_ebpf_types::{Connection, HTTPEventKind, HTTPRequestEvent, PacketData};
 
 mod bindings;
@@ -182,7 +182,7 @@ pub fn kite_ingress(ctx: SkBuffContext) -> i32 {
     match ingress_main(&ctx) {
         Ok(res) => res as i32,
         Err(err) => {
-            error!(&ctx, "Error: {}", err);
+            error!(&ctx, "kite_ingress - Error: {}", err);
             SK_PASS as i32
         }
     }
@@ -267,7 +267,7 @@ pub fn kite_egress(ctx: SkBuffContext) -> i32 {
     match egress_main(&ctx) {
         Ok(res) => res as i32,
         Err(err) => {
-            error!(&ctx, "Error: {}", err);
+            error!(&ctx, "kite_egress - Error: {}", err);
             SK_PASS as i32
         }
     }
@@ -314,7 +314,6 @@ fn egress_main(ctx: &SkBuffContext) -> Result<u32, i64> {
             begin_tracking_http_request(ctx, &tcp, conn, cookie, kind)?;
         }
         Some(state) => {
-            info!(ctx, "We have seen this connection before");
             // We have seen this connection before.
             let state = unsafe { &mut *state };
 
@@ -362,7 +361,7 @@ pub fn kite_sock_release(ctx: SockContext) -> i32 {
     match try_sock_release(&ctx) {
         Ok(res) => res,
         Err(err) => {
-            error!(&ctx, "Error: {}", err);
+            error!(&ctx, "kite_sock_release - Error: {}", err);
             1
         }
     }
@@ -375,7 +374,7 @@ fn try_sock_release(ctx: &SockContext) -> Result<i32, i64> {
         return Ok(1);
     } else {
         let data = maybe_data.unwrap();
-        debug!(
+        trace!(
             ctx,
             "Connection {:i}:{}->{:i}{} closed",
             data.conn.src.addr,
