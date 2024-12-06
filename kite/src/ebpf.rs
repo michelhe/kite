@@ -150,7 +150,6 @@ impl KiteEbpf {
 
         let mut perf_array = AsyncPerfEventArray::try_from(events_map)?;
 
-        let http_status_cloned = http_stats.clone();
         let cgroup_path = cgroup_path.to_owned();
 
         let (sender, mut receiver) = channel::<PerfReadTaskMessage<HTTPRequestEvent>>(1024);
@@ -164,7 +163,7 @@ impl KiteEbpf {
                 for event in message.events {
                     if let Err(e) = process_cgroup_http_event(
                         event,
-                        http_status_cloned.clone(),
+                        http_stats.clone(),
                         &cgroup_path,
                         base_labels.clone(),
                     )
