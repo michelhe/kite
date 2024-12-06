@@ -338,7 +338,7 @@ fn egress_main(ctx: &SkBuffContext) -> Result<u32, i64> {
                 }
                 Some(HTTPDetection::Response) => {
                     // This skb is a response to a request we've seen before.
-                    info!(
+                    trace!(
                         ctx,
                         "Response on {:i}:{} -> {:i}:{}",
                         conn.src.addr,
