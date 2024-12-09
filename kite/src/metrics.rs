@@ -1,7 +1,7 @@
 //! Handle recording of metrics for HTTP events sent from the eBPF programs.
 
 use core::str;
-use std::{net::IpAddr, path::Path, time::Duration};
+use std::{path::Path, time::Duration};
 
 use anyhow::Context as _;
 use httparse::EMPTY_HEADER;
@@ -30,18 +30,6 @@ async fn record_internal(
     entry.latencies.push(duration_ns); // Convert ns to ms
 }
 
-async fn add_address_labels(addr: IpAddr, labels: &mut Vec<(String, String)>) {
-    let is_global = is_global_ip(addr);
-    labels.push((
-        "kite_ip_is_global".to_string(),
-        if is_global {
-            "true".to_string()
-        } else {
-            "false".to_string()
-        },
-    ));
-}
-
 async fn record_prometheus_metrics(
     base_metric_name: &str,
     key: Endpoint,
@@ -62,7 +50,15 @@ async fn record_prometheus_metrics(
         .map(|label| (label.key().to_string(), label.value().to_string()))
         .collect::<Vec<_>>();
 
-    add_address_labels(key.addr, &mut labels).await;
+    let is_global = is_global_ip(key.addr);
+    labels.push((
+        "kite_ip_is_global".to_string(),
+        if is_global {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        },
+    ));
 
     histogram!(format!("{base_metric_name}.duration"), &labels).record(duration_ns as f64);
     counter!(format!("{base_metric_name}.count"), &labels).increment(1);
