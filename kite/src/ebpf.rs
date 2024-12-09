@@ -66,7 +66,6 @@ impl KiteEbpf {
 
         aya_log::EbpfLogger::init(&mut ebpf).context("Failed to initialize eBPF logger")?;
 
-        let mut loaded_progs = Vec::new();
         // Load and attach the ingress cgroup skb program
         let program_ig: &mut CgroupSkb = ebpf
             .program_mut("kite_ingress")
@@ -78,7 +77,7 @@ impl KiteEbpf {
             CgroupSkbAttachType::Ingress,
             CgroupAttachMode::default(),
         )?;
-        loaded_progs.push("kite_ingress");
+        info!("Attached kite_ingress program");
 
         // Load and attach the egress cgroup skb program
         let program_eg: &mut CgroupSkb = ebpf
@@ -91,7 +90,7 @@ impl KiteEbpf {
             CgroupSkbAttachType::Egress,
             CgroupAttachMode::default(),
         )?;
-        loaded_progs.push("kite_egress");
+        info!("Attached kite_egress program");
 
         // Load and attach the egress cgroup sock program
         let program_sock_release: &mut CgroupSock = ebpf
@@ -100,12 +99,10 @@ impl KiteEbpf {
             .try_into()?;
         if program_sock_release.load().is_ok() {
             program_sock_release.attach(cgroup_file.try_clone()?, CgroupAttachMode::default())?;
-            loaded_progs.push("kite_sock_release");
+            info!("Attached kite_sock_release program");
         } else {
             warn!("Failed to load kite_sock_release program, skipping for now. TODO fix this, without this program we may leak memory");
         }
-
-        info!("Successfully loadded ebpf with programs {:?}", loaded_progs);
 
         KiteEbpf::new(ebpf, cgroup_path.to_owned(), base_labels.into_labels()).await
     }
