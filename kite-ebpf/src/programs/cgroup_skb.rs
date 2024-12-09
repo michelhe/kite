@@ -41,7 +41,10 @@ pub fn cgroup_skb_program(ctx: &SkBuffContext, prog_type: ProgramType) -> Result
             let http_detection = http_detection.unwrap();
 
             let kind = match http_detection {
-                HTTPDetection::Request => HTTPEventKind::OutboundRequest,
+                HTTPDetection::Request => match prog_type {
+                    ProgramType::Ingress => HTTPEventKind::InboundRequest,
+                    ProgramType::Egress => HTTPEventKind::OutboundRequest,
+                },
                 HTTPDetection::Response => {
                     // This is likely a response to a request that was sent before the connection was tracked.
                     warn!(
