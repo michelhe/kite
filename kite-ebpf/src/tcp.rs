@@ -43,45 +43,39 @@ fn parse_ipv4(ctx: &SkBuffContext) -> Result<Option<ParsedTcp>, c_long> {
     }))
 }
 
-// /// Check if the given protocol is an extension header.
-// /// See https://en.wikipedia.org/wiki/IPv6_packet#Extension_headers
-// #[inline(always)]
-// fn is_extension_header(proto: IpProto) -> Result<bool, c_long> {
-//     match proto {
-//         IpProto::HopOpt => Ok(true),
-//         IpProto::Ipv6Route => Ok(true),
-//         IpProto::Ipv6Frag => Ok(true),
-//         IpProto::Esp => Ok(true),
-//         IpProto::Ah => Ok(true),
-//         IpProto::Ipv6Opts => Ok(true),
-//         IpProto::MobilityHeader => Ok(true),
-//         IpProto::Hip => Ok(true),
-//         IpProto::Shim6 => Ok(true),
-//         IpProto::Test1 | IpProto::Test2 => Ok(true),
-//         _ => Ok(false),
-//     }
-// }
+/// Check if the given protocol is an extension header.
+/// See https://en.wikipedia.org/wiki/IPv6_packet#Extension_headers
+#[inline(always)]
+fn is_extension_header(proto: IpProto) -> Result<bool, c_long> {
+    match proto {
+        IpProto::HopOpt => Ok(true),
+        IpProto::Ipv6Route => Ok(true),
+        IpProto::Ipv6Frag => Ok(true),
+        IpProto::Esp => Ok(true),
+        IpProto::Ah => Ok(true),
+        IpProto::Ipv6Opts => Ok(true),
+        IpProto::MobilityHeader => Ok(true),
+        IpProto::Hip => Ok(true),
+        IpProto::Shim6 => Ok(true),
+        IpProto::Test1 | IpProto::Test2 => Ok(true),
+        _ => Ok(false),
+    }
+}
 
-// /// Parses an extension header and returns its next header value and length. Extension headers have a common format:
-// /// The first byte specifies the next_header field.
-// /// The second byte specifies the header_length (in 8-byte units, excluding the first 8 bytes).
-// fn get_extension_header(data: &[u8]) -> Result<(IpProto, usize), c_long> {
-//     if data.len() < 2 {
-//         return Err(1); // Not enough data to parse the extension header
-//     }
+/// Parses an extension header and returns its next header value and length. Extension headers have a common format:
+/// The first byte specifies the next_header field.
+/// The second byte specifies the header_length (in 8-byte units, excluding the first 8 bytes).
+fn get_extension_header(ctx: &SkBuffContext, offset: usize) -> Result<(IpProto, usize), c_long> {
+    let next_header = unsafe { core::mem::transmute(ctx.load::<u8>(offset)?) };
+    let header_len_units = ctx.load::<u8>(offset + 1)? as usize;
 
-//     let next_header = unsafe { core::mem::transmute::<u8, IpProto>(data[0]) };
-//     let header_len_units = data[1] as usize;
+    // The total header length is (header_len_units + 1) * 8 bytes
+    let header_len = (header_len_units + 1) * 8;
 
-//     // The total header length is (header_len_units + 1) * 8 bytes
-//     let header_len = (header_len_units + 1) * 8;
+    Ok((next_header, header_len))
+}
 
-//     if data.len() < header_len {
-//         return Err(1); // Malformed header
-//     }
-
-//     Ok((next_header, header_len))
-// }
+const EXT_HDR_SIZE: usize = 8;
 
 /// Parse an IPv6 packet and extracts TCP payload information.
 /// Assumes that the packet is an IPv6 packet (i.e., the caller should check the protocol field).
@@ -92,20 +86,20 @@ fn parse_ipv6(ctx: &SkBuffContext) -> Result<Option<ParsedTcp>, c_long> {
     let ipv6_hlen = Ipv6Hdr::LEN;
     let payload_len = u16::from_be(ip.payload_len) as usize;
 
-    // const EXT_HDR_SIZE: usize = 8;
+    // Traverse the header chain until we find the TCP header
+    let mut next_hdr = ip.next_hdr;
+    let mut offset = ipv6_hlen;
 
-    // // Traverse the header chain until we find the TCP header
-    // let mut next_hdr = ip.next_hdr;
-    // let mut offset = ipv6_hlen;
-    // while is_extension_header(next_hdr).unwrap() {
-    //     let hdr: [u8; EXT_HDR_SIZE] = ctx.load(offset)?;
-    //     let (next, len) = get_extension_header(&hdr)?;
-    //     next_hdr = next;
-    //     offset += len;
-    // }
+    // eBPF does not permit unbounded loops, so we limit the number of extension headers we can parse.
+    for _ in 0..10 {
+        if !is_extension_header(next_hdr)? {
+            break;
+        }
 
-    let next_hdr = ip.next_hdr;
-    let offset = ipv6_hlen;
+        let (next, len) = get_extension_header(&ctx, offset)?;
+        next_hdr = next;
+        offset += EXT_HDR_SIZE + len;
+    }
 
     if next_hdr != IpProto::Tcp {
         return Ok(None);
