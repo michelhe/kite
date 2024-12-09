@@ -15,7 +15,7 @@ pub struct HTTPConnectionState {
     pub kind: HTTPEventKind,
     pub request_count: usize,
     pub total_time_ns: u64,
-    pub total_bytes: usize,
+    pub header_bytes: usize,
     pub last_request_time_ns: u64,
 }
 
@@ -34,7 +34,7 @@ pub fn on_request(
         kind,
         request_count: 1,
         total_time_ns: 0,
-        total_bytes: tcp.data_size,
+        header_bytes: tcp.data_size,
         last_request_time_ns: unsafe { bpf_ktime_get_ns() },
     };
     maps::KITE_CONTRACK.insert(&cookie, &data, BPF_F_NO_PREALLOC as u64)?;
@@ -85,7 +85,7 @@ pub fn on_response(
         conn.dst.addr,
         conn.dst.port,
         duration_ns / 1_000_000,
-        state.total_bytes,
+        state.header_bytes,
     );
 
     // Submit the event to userspace
@@ -93,7 +93,7 @@ pub fn on_response(
     let event = maps::get_scratch_event()?;
     event.cookie = cookie;
     event.event_kind = event_kind;
-    event.total_bytes = state.total_bytes;
+    event.header_bytes = state.header_bytes;
     event.conn = conn;
     event.duration_ns = duration_ns;
 

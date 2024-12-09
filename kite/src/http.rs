@@ -19,3 +19,12 @@ pub fn get_path<'buf>(request: &'buf Request) -> Option<&'buf str> {
 pub fn get_status(response: &Response) -> u16 {
     response.code.unwrap_or(0)
 }
+
+pub fn get_content_length(response: &Response) -> Option<usize> {
+    response
+        .headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("content-length"))
+        .and_then(|header| str::from_utf8(header.value).ok())
+        .and_then(|value| value.parse().ok())
+}

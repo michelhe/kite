@@ -110,7 +110,7 @@ pub struct HTTPRequestEvent {
     /// The duration does not include the time it takes to read the response body.
     pub duration_ns: u64,
     /// TODO: This a slight lie for now, as we we are not actually measuring the data sent in the response body.
-    pub total_bytes: usize,
+    pub header_bytes: usize,
 
     // /// The request data.
     pub request: PacketData,

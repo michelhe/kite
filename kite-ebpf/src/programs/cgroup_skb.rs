@@ -64,7 +64,7 @@ pub fn cgroup_skb_program(ctx: &SkBuffContext, prog_type: ProgramType) -> Result
             let state = unsafe { &mut *state };
 
             // Account for the size of the packet.
-            state.total_bytes += tcp.data_size;
+            state.header_bytes += tcp.data_size;
 
             match http_detection {
                 None => {
