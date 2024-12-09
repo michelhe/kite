@@ -39,7 +39,7 @@ async fn record_prometheus_metrics(
     extra_labels: &[Label],
 ) {
     let base_labels = [
-        // ("endpoint", format!("{:?}", key)),  TODO: This causes numerous time series to be created, which is not ideal. Fix later.
+        ("port", format!("{:?}", key.port)),
         ("cgroup_path", cgroup_path.to_string_lossy().to_string()),
     ]
     .into_labels();
