@@ -74,7 +74,9 @@ pub async fn main() -> anyhow::Result<()> {
 
     let extra_labels = [(
         "hostname",
-        std::fs::read_to_string("/proc/sys/kernel/hostname")?,
+        std::fs::read_to_string("/proc/sys/kernel/hostname")?
+            .trim_end()
+            .to_string(),
     )];
 
     let _kite = KiteEbpf::load(&cgroup_path, &extra_labels).await?;

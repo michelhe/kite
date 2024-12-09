@@ -9,7 +9,7 @@ pub fn get_host<'buf>(request: &'buf Request) -> Option<Result<&'buf str, Utf8Er
         .headers
         .iter()
         .find(|header| header.name.eq_ignore_ascii_case("host"))
-        .map(|header| str::from_utf8(header.value))
+        .map(|header| str::from_utf8(header.value).map(|s| s.trim_end()))
 }
 
 pub fn get_path<'buf>(request: &'buf Request) -> Option<&'buf str> {
