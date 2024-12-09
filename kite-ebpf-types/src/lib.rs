@@ -31,7 +31,7 @@ impl core::fmt::Display for Endpoint {
 }
 
 #[repr(C, packed)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 /// A convenience type for representing a connection between two endpoints.
 pub struct Connection {
     pub src: Endpoint,
@@ -39,8 +39,22 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub fn new(src: Endpoint, dst: Endpoint) -> Self {
-        Self { src, dst }
+    /// Create a new connection from ingress path.
+    /// The argument are the source and destination endpoints as present in the packet.
+    pub fn from_ingress(tcp_src: Endpoint, tcp_dst: Endpoint) -> Self {
+        Self {
+            src: tcp_src,
+            dst: tcp_dst,
+        }
+    }
+
+    /// Create a new connection from egress path.
+    /// The argument are the source and destination endpoints as present in the packet.
+    pub fn from_egress(tcp_src: Endpoint, tcp_dst: Endpoint) -> Self {
+        Self {
+            src: tcp_dst,
+            dst: tcp_src,
+        }
     }
 
     pub fn filter_port(&self, port: u16) -> bool {

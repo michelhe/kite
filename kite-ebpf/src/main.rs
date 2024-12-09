@@ -10,10 +10,9 @@ use aya_ebpf::{
     programs::{SkBuffContext, SockContext},
     EbpfContext,
 };
-use aya_log_ebpf::{debug, error, info, trace, warn};
+use aya_log_ebpf::{debug, error, trace, warn};
 use kite_ebpf_types::{Connection, HTTPEventKind, HTTPRequestEvent, PacketData};
 
-mod bindings;
 mod tcp;
 use tcp::{parse_tcp, ParsedTcp};
 mod http;
@@ -197,7 +196,7 @@ fn ingress_main(ctx: &SkBuffContext) -> Result<u32, c_long> {
     let tcp = maybe_tcp.unwrap(); // Safe to unwrap because we checked for None
     let http_detection = detect_http(&ctx, &tcp)?;
 
-    let conn = Connection::new(tcp.src, tcp.dst);
+    let conn = Connection::from_egress(tcp.src, tcp.dst);
 
     let cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr()) };
 
@@ -282,7 +281,7 @@ fn egress_main(ctx: &SkBuffContext) -> Result<u32, i64> {
     let http_detection = detect_http(&ctx, &tcp)?;
 
     // In the egress program, the source and destination are reversed because the packet is going out.
-    let conn = Connection::new(tcp.dst, tcp.src);
+    let conn = Connection::from_egress(tcp.src, tcp.dst);
 
     let cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr()) };
 
