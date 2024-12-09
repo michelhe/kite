@@ -164,8 +164,11 @@ fn finish_tracking_http_request(
     event.total_bytes = state.total_bytes;
     event.conn = conn;
     event.duration_ns = duration_ns;
+
     // Copy state.request into event.request
     event.request = unsafe { *REQUEST_PACKETS.get(&cookie).ok_or(SK_PASS)? };
+    // And free memory
+    REQUEST_PACKETS.remove(&cookie)?;
 
     let pd = get_scratch_packet()?;
     read_packet(ctx, pd, tcp.data_offset as u32)?;
